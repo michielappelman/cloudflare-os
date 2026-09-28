@@ -262,6 +262,7 @@ function getHeader(headers: Record<string, string>, name: string): string | unde
 
 type HandleArgs = {
   model: Model<Api>;
+  reasoningEffort?: AiModelConfig["reasoningEffort"];
   // Provider auth: a plain API key (pi turns it into the SDK's native auth) and/or headers.
   // A null header value suppresses a default header ({Authorization: null, "x-api-key": null}
   // alongside cf-aig-authorization makes pi skip SDK auth entirely).
@@ -290,16 +291,18 @@ function makeHandle(args: HandleArgs): ModelHandle {
   //   Anthropic models (e.g. Haiku 4.5, which rejects the adaptive format) we pass nothing, so pi
   //   omits the `thinking` field and the provider default (no extended thinking) applies --
   //   matching the pre-pi quick-model behavior.
-  // - OpenAI Responses: explicit medium reasoning effort. pi would otherwise *disable* reasoning
-  //   when no effort is passed; effort selection also makes pi request encrypted reasoning
-  //   content, which -- with pi's unconditional `store: false` -- preserves the old stateless
-  //   ZDR behavior with reasoning carried between tool steps.
+  // - OpenAI Responses: per-model reasoning effort, defaulting to medium. pi would otherwise
+  //   disable reasoning when no effort is passed; setting one also makes pi request encrypted
+  //   reasoning content, which -- with pi's unconditional `store: false` -- preserves the old
+  //   stateless ZDR behavior with reasoning carried between tool steps.
   // - Everything else: provider defaults.
   const anthropicCompat = args.model.compat as AnthropicMessagesCompat | undefined;
   const apiExtras: Record<string, unknown> =
       args.model.api === "anthropic-messages"
           ? (anthropicCompat?.forceAdaptiveThinking === true ? { thinkingEnabled: true } : {}) :
-      args.model.api === "openai-responses" ? { reasoningEffort: "medium" } : {};
+      args.model.api === "openai-responses"
+          ? { reasoningEffort: args.reasoningEffort ?? "medium" }
+          : {};
 
   const handle: ModelHandle = {
     model: args.model,
@@ -401,6 +404,7 @@ function getModelViaUserGateway(
   }
   return makeHandle({
     model,
+    reasoningEffort: config.reasoningEffort,
     // The Google SDK requires an API key and sends it as `x-goog-api-key`, which the gateway
     // forwards verbatim unless it recognizes the token as gateway auth -- same stored-key flow
     // as the platform path (see getModelViaGateway).
@@ -494,6 +498,7 @@ function getModelViaGateway(
 
   return makeHandle({
     model,
+    reasoningEffort: config.reasoningEffort,
     // The google API impl requires an apiKey (it doesn't recognize header-owned auth), and the
     // @google/genai SDK sends it as `x-goog-api-key` on every request -- which AI Gateway treats
     // as a provider key and forwards to Google verbatim, bypassing the gateway's server-managed
@@ -652,6 +657,7 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           thinkingLevelMap: catalog?.thinkingLevelMap,
           compat: catalog?.compat,
         },
+        reasoningEffort: config.reasoningEffort,
         ...directAuth(config, "Authorization"),
         sessionAffinity,
       });

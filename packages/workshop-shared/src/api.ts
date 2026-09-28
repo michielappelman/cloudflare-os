@@ -1318,6 +1318,12 @@ export type AiModelConfig = {
   apiUrl?: string;
 
   /**
+   * Reasoning effort for OpenAI Responses models. When absent, the Workshop keeps its existing
+   * medium-effort default.
+   */
+  reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+  /**
    * Additional HTTP headers to send with every request to the provider, keyed by header name.
    * These override the provider's default headers of the same name (including authentication
    * headers), which is useful for proxies that require their own credentials. Like `apiToken`
@@ -1363,6 +1369,12 @@ export const WORKERS_AI_OUTPUT_LIMIT = 32768;
 /** One entry of SUGGESTED_MODELS. */
 type SuggestedModel = {
   name: string;
+
+  /** OpenAI API model ID when this picker entry is an alias for a named configuration. */
+  apiModel?: string;
+
+  /** OpenAI Responses reasoning effort for this picker entry. */
+  reasoningEffort?: AiModelConfig["reasoningEffort"];
 
   /** The maximum tokens one request may total. */
   contextWindow: number;
@@ -1414,6 +1426,10 @@ const SUGGESTED_MODEL_CATALOG = {
     "gpt-6-luna": {
       name: "GPT-6 Luna", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+    },
+    "gpt-6-luna-xhigh": {
+      name: "GPT-6 Luna (xhigh)", apiModel: "gpt-6-luna", reasoningEffort: "xhigh",
+      contextWindow: 1050000, outputLimit: 128000, compactionInputBudget: 272000,
     },
     "gpt-6-astra": {
       name: "GPT-6 Astra", contextWindow: 1050000, outputLimit: 128000,

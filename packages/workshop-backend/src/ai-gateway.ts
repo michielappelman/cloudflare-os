@@ -103,11 +103,15 @@ export class AiGatewayConfig {
   resolveModel(modelId: string): UserAiModelRecord | undefined {
     for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
       if (this.providers.has(provider) && modelId in models) {
+        const suggested = models[modelId];
         return {
-          profile: { type: "agent", id: modelId, name: models[modelId].name },
+          profile: { type: "agent", id: modelId, name: suggested.name },
           config: {
             provider: provider as AiModelConfig["provider"],
-            model: modelId,
+            model: suggested.apiModel ?? modelId,
+            ...(suggested.reasoningEffort
+                ? { reasoningEffort: suggested.reasoningEffort }
+                : {}),
             // apiToken and apiUrl are ignored when AI Gateway mode is active -- getModel()
             // reads the real values from env. We set them to empty strings here to satisfy
             // the type.
