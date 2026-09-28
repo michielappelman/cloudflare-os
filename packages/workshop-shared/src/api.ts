@@ -1384,7 +1384,7 @@ type SuggestedModel = {
 
   /**
    * When present, the preferred prompt budget used for compaction, below the model's hard context
-   * window. Can avoid long-context pricing (GPT-5.6 doubles above 272K) while retaining the full
+   * window. Can avoid long-context pricing (GPT-6 doubles above 272K) while retaining the full
    * window as the hard limit.
    */
   compactionInputBudget?: number;
@@ -1412,9 +1412,6 @@ const SUGGESTED_MODEL_CATALOG = {
   "anthropic": {
     "claude-opus-5-5": {name: "Claude Opus 5.5", contextWindow: 1000000},
     "claude-fable-5-1": {name: "Claude Fable 5.1", contextWindow: 1000000},
-    "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000},
-    "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000},
-    "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
   },
   "openai": {
     // pi's GPT-6 catalog reports a 272K window, but these models support 1.05M. Use 272K as the
@@ -1433,18 +1430,6 @@ const SUGGESTED_MODEL_CATALOG = {
     },
     "gpt-6-astra": {
       name: "GPT-6 Astra", contextWindow: 1050000, outputLimit: 128000,
-      compactionInputBudget: 272000,
-    },
-    "gpt-5.6-sol": {
-      name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000,
-      compactionInputBudget: 272000,
-    },
-    "gpt-5.6-luna": {
-      name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000,
-      compactionInputBudget: 272000,
-    },
-    "gpt-5.6-terra": {
-      name: "GPT 5.6 Terra", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
     },
   },
