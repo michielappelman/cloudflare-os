@@ -4,7 +4,7 @@ Keep `origin` pointed at `git@github.com:michielappelman/cloudflare-os.git` and 
 repository once as `upstream`:
 
 ```sh
-git remote add upstream git@github.com:cloudflare/cloudflare-os.git
+git remote add upstream https://github.com/cloudflare/cloudflare-os.git
 ```
 
 Before syncing, commit and push the fork's changes to `origin/main`, then fetch both remotes and
