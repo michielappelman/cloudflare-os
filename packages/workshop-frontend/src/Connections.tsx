@@ -38,13 +38,15 @@ interface ViewerAccount {
 
 /**
  * The viewer's account a binding's connection was created from, if it can be told. The backend
- * reports `accountId` only to the user who created the connection. Connections created before that
- * was recorded carry none; for those, the viewer's one account of the same vendor is the only
- * candidate worth offering -- with two or more there is no telling which, so none is offered.
+ * reports `accountId` only to the user who created the connection, and `connectedByOtherUser` to
+ * everyone else. Connections created before that was recorded carry neither; for those, the
+ * viewer's one account of the same vendor is the only candidate worth offering -- with two or more
+ * there is no telling which, so none is offered.
  */
 function accountForBinding(
     binding: GadgetBindingInfo, accounts: Map<number, ViewerAccount>): ViewerAccount | undefined {
   if (binding.accountId !== undefined) return accounts.get(binding.accountId)
+  if (binding.connectedByOtherUser) return undefined
   const vendorId = binding.vendorId?.toLowerCase()
   if (!vendorId) return undefined
   const sameVendor = [...accounts.values()].filter((a) => a.vendorId.toLowerCase() === vendorId)

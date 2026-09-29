@@ -12587,11 +12587,13 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
         vendorId: gatekeeper?.creationSpec?.type === "gatekeeper"
             ? gatekeeper.creationSpec.vendorId
             : undefined,
-        // Only to the user who connected it: an account id means nothing in anyone else's
-        // account list, and only its owner can reconnect it.
-        ...(gatekeeper?.connectedAccount?.userId === this.clientUserId
+        // The account id only to the user who connected it: it means nothing in anyone else's
+        // account list, and only its owner can reconnect it. Anyone else learns just that the
+        // connection isn't theirs, so a client doesn't mistake it for an untracked one of its own.
+        ...(gatekeeper?.connectedAccount === undefined ? {}
+            : gatekeeper.connectedAccount.userId === this.clientUserId
             ? {accountId: gatekeeper.connectedAccount.accountId}
-            : {}),
+            : {connectedByOtherUser: true}),
         ...(edge.pending ? {chatId: edge.pending.chatId} : {}),
       };
     });

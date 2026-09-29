@@ -4081,6 +4081,13 @@ export type GadgetBindingInfo = {
   accountId?: number;
 
   /**
+   * True when the target connection is known to have been created from another user's account, so
+   * none of the caller's accounts backs it. Absent when the caller created it (see `accountId`) and
+   * for connections created before this was recorded, whose account is unknown.
+   */
+  connectedByOtherUser?: boolean;
+
+  /**
    * If present, this binding is still provisional to the given chat (which is necessarily the
    * `chatId` passed to listBindings(); edges pending in other chats are never listed). It becomes
    * permanent when the user accepts that chat's changes through the message that recorded it, and
