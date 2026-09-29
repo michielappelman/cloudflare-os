@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import { Dialog, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
   ArrowsClockwise,
+  GearSix,
   Pencil,
   Trash,
   Blueprint,
@@ -23,12 +25,11 @@ import {
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
-import { openConnectWindow } from './connectHandoff'
 import { logRpcFailure } from './rpcErrors'
 import { isImeComposing } from './keyboardEvent'
 
-// The viewer's own connected accounts, as far as this panel needs them: enough to offer a
-// reconnect on the rows whose connection came from one of them.
+// The viewer's own connected accounts, as far as this panel needs them: enough to flag expired
+// credentials on the rows whose connection came from one of them, and to link to that account.
 interface ViewerAccount {
   id: number
   vendorId: string
@@ -40,8 +41,8 @@ interface ViewerAccount {
  * The viewer's account a binding's connection was created from, if it can be told. The backend
  * reports `accountId` only to the user who created the connection, and `connectedByOtherUser` to
  * everyone else. Connections created before that was recorded carry neither; for those, the
- * viewer's one account of the same vendor is the only candidate worth offering -- with two or more
- * there is no telling which, so none is offered.
+ * viewer's one account of the same vendor is the only candidate worth linking to -- with two or
+ * more there is no telling which, so none is.
  */
 function accountForBinding(
     binding: GadgetBindingInfo, accounts: Map<number, ViewerAccount>): ViewerAccount | undefined {
@@ -85,10 +86,10 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
   const [accounts, setAccounts] = useState<Map<number, ViewerAccount>>(new Map())
-  const [reconnectingAccountId, setReconnectingAccountId] = useState<number | null>(null)
   const toasts = useKumoToastManager()
+  const navigate = useNavigate()
 
-  // Live, so a row's expired marker clears as soon as a reconnect popup completes.
+  // Live, so a row's expired marker clears as soon as the account is reconnected.
   useEffect(() => {
     let cancelled = false
     const accountMap = new Map<number, ViewerAccount>()
@@ -117,18 +118,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       subscription[Symbol.dispose]()
     }
   }, [authenticatedApi])
-
-  const handleReconnect = async (accountId: number) => {
-    setReconnectingAccountId(accountId)
-    try {
-      openConnectWindow(await authenticatedApi.reconnectAccount(accountId))
-    } catch (err) {
-      console.error('Failed to reconnect account:', err)
-      toasts.add({ title: 'Failed to reconnect account', variant: 'error' })
-    } finally {
-      setReconnectingAccountId(null)
-    }
-  }
 
   const loadGatekeepers = async () => {
     try {
@@ -404,14 +393,25 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                         </div>
                         <div className="ml-auto flex shrink-0 items-center gap-1">
                           {account && (
-                            <Tooltip content={`Reconnect ${account.name}`} asChild>
+                            // Credentials belong to the account, not this gadget: a reconnect fixes
+                            // every connection made from it. So it lives in the account's own
+                            // modal, which also shows who the account is before reconnecting.
+                            <Tooltip
+                              content={expired
+                                ? `Reconnect ${account.name} in Gatekeepers`
+                                : `Manage ${account.name} in Gatekeepers`}
+                              asChild
+                            >
                               <WorkshopIconButton
-                                onClick={() => handleReconnect(account.id)}
-                                disabled={reconnectingAccountId === account.id}
-                                aria-label={`Reconnect ${account.name}`}
+                                onClick={() => void navigate({
+                                  to: '/gatekeepers', search: { account: account.id },
+                                })}
+                                aria-label={expired
+                                  ? `Reconnect ${account.name} in Gatekeepers`
+                                  : `Manage ${account.name} in Gatekeepers`}
                                 className={expired ? '!text-kumo-danger' : ''}
                               >
-                                <ArrowsClockwise size={14} />
+                                {expired ? <ArrowsClockwise size={14} /> : <GearSix size={14} />}
                               </WorkshopIconButton>
                             </Tooltip>
                           )}
