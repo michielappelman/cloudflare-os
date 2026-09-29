@@ -193,6 +193,37 @@ describe('site favicon', () => {
   })
 })
 
+describe('site favicon default', () => {
+  it('falls back to the icon index.html declares, not a hardcoded /favicon.svg', () => {
+    document.head.innerHTML = '<link rel="icon" type="image/png" href="/favicon.png">'
+    const favicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]')!
+
+    applySiteFavicon(undefined)
+    expect(favicon.getAttribute('href')).toBe('/favicon.png')
+    expect(favicon.type).toBe('image/png')
+  })
+
+  it('keeps the declared default across repeated calls after a swap', async () => {
+    document.head.innerHTML = '<link rel="icon" type="image/png" href="/favicon.png">'
+    const blob = new Blob([new Uint8Array([1])], { type: 'image/png' })
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue({
+      ok: true, status: 200, blob: () => Promise.resolve(blob),
+    } as Response))
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn<(blob: Blob) => string>().mockReturnValue('blob:favicon'),
+      revokeObjectURL: vi.fn<(url: string) => void>(),
+    })
+    const favicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]')!
+
+    const cleanup = applySiteFavicon('/api/site-logo?v=1')
+    await vi.waitFor(() => expect(favicon.getAttribute('href')).toBe('blob:favicon'))
+    cleanup()
+
+    applySiteFavicon(undefined)
+    expect(favicon.getAttribute('href')).toBe('/favicon.png')
+  })
+})
+
 describe('site logo cache busting', () => {
   it('adds a client-only token to canonical URLs', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000)

@@ -245,12 +245,17 @@ export function applySiteFavicon(logoUrl: string | undefined): () => void {
   const favicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]')
   if (!favicon) return () => {}
 
+  // The icon index.html declares, remembered on the element before the first swap: a deployment
+  // may ship its own in place of the default /favicon.svg.
+  favicon.dataset.defaultHref ??= favicon.getAttribute('href') ?? '/favicon.svg'
+  favicon.dataset.defaultType ??= favicon.getAttribute('type') ?? ''
+  const { defaultHref, defaultType } = favicon.dataset
   const controller = new AbortController()
   let objectUrl: string | undefined
   let disposed = false
   const useDefault = () => {
-    favicon.href = '/favicon.svg'
-    favicon.type = 'image/svg+xml'
+    favicon.href = defaultHref
+    favicon.type = defaultType ?? ''
   }
   useDefault()
   if (!logoUrl) return () => {}
