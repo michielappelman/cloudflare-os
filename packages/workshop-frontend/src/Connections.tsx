@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import { Dialog, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
   Pencil,
@@ -55,6 +56,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
   const toasts = useKumoToastManager()
+  const navigate = useNavigate()
 
   const loadGatekeepers = async () => {
     try {
@@ -215,13 +217,17 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                 External resources this gadget can use.
               </p>
             </div>
-            <WorkshopButton
-              tone="primary"
-              onClick={() => setIsNewConnectionModalVisible(true)}
-              className="self-start"
-            >
-              Connect resource
-            </WorkshopButton>
+            <div className="flex shrink-0 flex-wrap items-center gap-2 self-start">
+              <WorkshopButton onClick={() => void navigate({ to: '/gatekeepers' })}>
+                Configure existing Gatekeepers...
+              </WorkshopButton>
+              <WorkshopButton
+                tone="primary"
+                onClick={() => setIsNewConnectionModalVisible(true)}
+              >
+                Connect resource
+              </WorkshopButton>
+            </div>
           </div>
 
           {loading ? (

@@ -28,6 +28,9 @@ interface ConnectConnectorModalProps {
   credentialsValid?: boolean
   disconnecting?: boolean
   onDisconnect?: () => void
+  // Manage mode: start a fresh authorization flow for this existing account.
+  onReconnect?: () => void
+  reconnecting?: boolean
   grantedResourceUrlPatterns?: string[]
   // Manage mode: invoked to expand the grant to include the given resource `urlPattern`s.
   onEnsureResources?: (resourceUrlPatterns: string[]) => void
@@ -50,6 +53,8 @@ export default function ConnectConnectorModal({
   credentialsValid = true,
   disconnecting = false,
   onDisconnect,
+  onReconnect,
+  reconnecting = false,
   grantedResourceUrlPatterns,
   onEnsureResources,
   ensuringResourceUrlPatterns = [],
@@ -165,7 +170,7 @@ export default function ConnectConnectorModal({
           ? accountDescription?.uniqueName
             ? `${accountDisplayName} / ${accountDescription.uniqueName}`
             : accountDisplayName
-          : 'Credentials expired; reconnect from the Gatekeepers page'}
+          : 'Credentials expired; reconnect to restore access'}
       </span>
     </div>
   ) : (
@@ -356,6 +361,15 @@ export default function ConnectConnectorModal({
           <div className="flex items-center gap-2">
             {isManage ? (
               <>
+                {!confirmingDisconnect && onReconnect && (
+                  <WorkshopButton
+                    onClick={onReconnect}
+                    disabled={reconnecting || disconnecting || ensuringBusy}
+                    className="!h-9"
+                  >
+                    {reconnecting ? 'Opening...' : 'Reconnect'}
+                  </WorkshopButton>
+                )}
                 {confirmingDisconnect ? (
                   <>
                     <WorkshopButton
