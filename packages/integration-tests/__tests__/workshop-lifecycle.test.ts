@@ -69,17 +69,12 @@ it.concurrent("lists workspace metadata after activity and removes it after dele
   }));
 
   await workspace.deleteSelf();
-  workspace[Symbol.dispose]();
-  // Deleting schedules the workspace DO's abort about 100ms out (Overseer.scheduleAccessRestart),
-  // and an abort severs every session that still has the workspace open: the session's
-  // `notifyClosed` stub is dropped uncalled, which AuthenticatedApiImpl reads as a lost DO and
-  // answers by closing the WebSocket. The dispose above usually reaches the DO first, but not
-  // always, so nothing below may depend on `authenticated` surviving. A browser would reconnect
-  // and log in again; so does this.
-  using reconnected = connect(requireHarness().url);
-  using relisted = await logIn(reconnected, owner);
+  // Deleting restarts the workspace DO about 100ms out (Overseer.scheduleAccessRestart), severing
+  // the WebSocket of every session that still holds it -- except the deleter's, which has nothing
+  // to reopen. `workspace` stays held through the restart, so this session must survive it.
+  await settleRestart();
   await waitFor("the deleted workspace to disappear from the user's list", async () =>
-    (await relisted.listGadgets()).some(entry => entry.id === id) ? null : true);
+    (await authenticated.listGadgets()).some(entry => entry.id === id) ? null : true);
 });
 
 it.concurrent("persists an ordered human-only chat without starting an agent", async () => {
@@ -102,7 +97,33 @@ it.concurrent("persists an ordered human-only chat without starting an agent", a
 
   await workspace.deleteChat(chatId);
   expect(await workspace.listChats()).toEqual([]);
+  expect((await workspace.getChatHistory(chatId)).messages).toEqual([]);
   await workspace.deleteSelf();
+});
+
+it.concurrent("a chat attachment is readable only through its chat, and a discarded upload is gone",
+    async () => {
+  using publicApi = connect(requireHarness().url);
+  using authenticated = await signUp(publicApi, username());
+  using ws = await authenticated.newGadget();
+
+  const content = new TextEncoder().encode("only chat A");
+  const sent = await ws.uploadChatAttachment({ mimeType: "text/plain", content, name: "a.txt" }, null);
+  const chatA = await ws.newChat("With attachment", null, undefined, [sent]);
+  const chatB = await ws.newChat("Without attachment", null);
+
+  expect(new TextDecoder().decode(await ws.getChatAttachmentContent(chatA, sent.id))).toBe("only chat A");
+  await expect(ws.getChatAttachmentContent(chatB, sent.id)).rejects.toThrow("Chat attachment not found.");
+
+  const discarded = await ws.uploadChatAttachment(
+      { mimeType: "text/plain", content: new TextEncoder().encode("never sent"), name: "b.txt" }, null);
+  await ws.deleteChatAttachment(discarded.id);
+  await expect(ws.sendChatMessage(chatB, "Late attachment", null, undefined, [discarded]))
+    .rejects.toThrow("Chat attachment not found.");
+  const { messages } = await ws.getChatHistory(chatB);
+  expect(messages).not.toContainEqual(expect.objectContaining({ message: "Late attachment" }));
+
+  await ws.deleteSelf();
 });
 
 it.concurrent("creates, renames, reopens, and removes a Gadget capability", async () => {
