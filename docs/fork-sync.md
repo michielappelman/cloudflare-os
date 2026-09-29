@@ -30,3 +30,15 @@ This keeps fork-specific commits in the history and avoids rewriting commits alr
 deployment. If the merge stops on conflicts, resolve and review them before committing. Do not
 force-push. For starter deployments, update the pinned `cloudflare-os` gitlink only after reviewing
 the resulting fork commit and running the starter's documented checks.
+
+## Removed upstream workflows
+
+The fork keeps only `.github/workflows/ci.yml`. Upstream's other workflows (Bonk, CLA, contribution
+policy, PR labeling, previews and evals) need Cloudflare's secrets or only make sense on the
+upstream repository, so they are deleted here, along with `.github/labeler.yml`. When upstream
+changes one of them, the merge stops on a modify/delete conflict. Keep the deletion:
+
+```sh
+git rm .github/workflows/<file>.yml
+git commit --no-edit
+```
