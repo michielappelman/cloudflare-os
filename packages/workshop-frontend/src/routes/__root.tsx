@@ -7,7 +7,7 @@ import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useRpcStub, useConnectionLost } from '../RpcContext'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
-import { HANDOFF_PATH } from '../connectHandoff'
+import { HANDOFF_PATH, START_PATH } from '../connectHandoff'
 import { FeatureFlagsProvider } from '../FeatureFlagsContext'
 import Header from '../components/Header'
 import AppShell from '../components/AppShell/AppShell'
@@ -29,8 +29,9 @@ function RootComponent() {
   const isSignup = pathname === '/signup'
   const isBlueprint = pathname.startsWith('/blueprint/')
   // The connect / sign-in handoff popup needs no shell and must not wait on auth: a sign-in popup
-  // has no session, and ConnectHandoffPage runs its own useAuth for connects.
-  const isHandoff = pathname === HANDOFF_PATH
+  // has no session, and ConnectHandoffPage runs its own useAuth for connects. The same goes for
+  // the page such a popup may start on (ConnectStartPage).
+  const isHandoff = pathname === HANDOFF_PATH || pathname === START_PATH
 
   // A standalone (no app shell) render is used for the handoff popup and for signed-out visitors
   // of public routes. Signed-in users get the full app chrome so public pages (esp. the blueprint

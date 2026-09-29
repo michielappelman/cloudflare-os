@@ -83,7 +83,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
       // Disowned like connect popups: sign-in providers are admin-allowlisted, but the popup
       // traverses provider pages all the same, and none of them gets a handle on this tab. The
       // nonce rides along in the popup's own storage for the handoff page to present.
-      let popup: Window
+      let popup: Window | null
       try {
         popup = openDisownedPopup(url, uniquePopupName('gatekeeper-login'), { kind: 'login', nonce })
       } catch (err) {
@@ -105,7 +105,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
           // the attempt expires server-side, which then shows as the expiry error. The buttons
           // stay disabled while a receive() is in flight, though: a second click at that moment
           // would tear down a call the server may be answering with the token.
-          if (popup.closed && inflight === null && mountedRef.current) setPending(null)
+          if (popup?.closed && inflight === null && mountedRef.current) setPending(null)
           // A receive() still in flight is not re-entered.
           if (inflight !== null) return
           inflight = attempt.receive()
@@ -133,7 +133,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
         }
       })
       // Best-effort: the page closes itself anyway, and a COOP swap leaves the handle dead.
-      try { popup.close() } catch { /* severed */ }
+      try { popup?.close() } catch { /* severed */ }
       if (!mountedRef.current) return  // user navigated away mid-flow; drop the result
       localStorage.setItem('authToken', token)
       if (onSuccess) onSuccess()

@@ -24,6 +24,12 @@ export function getBackendHost(): string {
  */
 export const HANDOFF_PATH = '/connect/handoff'
 
+/**
+ * Path on the Workshop origin that starts a flow in a popup this tab could not hand the nonce to
+ * directly (see `openDisownedPopup`), with the handoff and the flow's URL in the URL fragment.
+ */
+export const START_PATH = '/connect/start'
+
 const HEX_256_PATTERN = /^[0-9a-f]{64}$/
 
 /**
@@ -69,21 +75,66 @@ export type PopupHandoff = { kind: 'connect' | 'login'; nonce: string }
  * flow: `window.open('', existingName)` returns an existing window without navigating it, and one
  * parked on a provider page is cross-origin, so the storage write would throw.
  *
- * Throws when the browser blocked the popup, or refused the storage write: without the nonce the
- * flow could never complete, so it is not started, and the popup is closed again.
+ * Some browsers (Orion, for one) open the popup but return null, which is indistinguishable from a
+ * block, or return a window whose storage this tab may not write. Either way the popup is then sent,
+ * by name, to START_PATH with the handoff and `url` in the fragment (never sent to a server), and
+ * that same-origin page stores the nonce, disowns itself and navigates on (see `readPopupStart`).
+ * Returns null in that case, since there is no handle to return. If the browser really did block
+ * the popup, the second open is blocked too and nothing happens.
  */
-export function openDisownedPopup(url: string, name: string, handoff: PopupHandoff): Window {
-  const popup = window.open('', name, 'popup,width=520,height=680')
-  if (!popup) throw new Error('Pop-up blocked. Please allow pop-ups and try again.')
-  popup.opener = null
-  try {
-    popup.sessionStorage.setItem(HANDOFF_KEY, JSON.stringify(handoff))
-  } catch {
-    popup.close()
-    throw new Error('This browser blocks storage in pop-ups, so the flow cannot complete. Allow site data for this site and try again.')
+export function openDisownedPopup(url: string, name: string, handoff: PopupHandoff): Window | null {
+  const popup = window.open('', name, POPUP_FEATURES)
+  if (popup) {
+    try {
+      popup.opener = null
+      popup.sessionStorage.setItem(HANDOFF_KEY, JSON.stringify(handoff))
+      popup.location.replace(url)
+      return popup
+    } catch {
+      // Fall through to the start page, which writes the storage from inside the popup.
+    }
   }
-  popup.location.replace(url)
-  return popup
+  const startUrl = `${START_PATH}#${encodeURIComponent(JSON.stringify({ ...handoff, url }))}`
+  if (popup) {
+    popup.location.replace(startUrl)
+    return popup
+  }
+  window.open(startUrl, name, POPUP_FEATURES)
+  return null
+}
+
+const POPUP_FEATURES = 'popup,width=520,height=680'
+
+/** What START_PATH's fragment carries: the handoff to store, and the flow's URL to navigate to. */
+export type PopupStart = { handoff: PopupHandoff; url: string }
+
+/**
+ * The `PopupStart` in a START_PATH fragment (`window.location.hash`), or null unless it names a
+ * well-formed handoff and a URL under `/gatekeeper/` on the Workshop's backend origin, where every
+ * connect and sign-in flow starts. Anything else is refused, so the page can't be used to send a
+ * visitor to an arbitrary site.
+ */
+export function readPopupStart(hash: string): PopupStart | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(decodeURIComponent(hash.startsWith('#') ? hash.slice(1) : hash))
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const { kind, nonce, url } = parsed as { kind?: unknown; nonce?: unknown; url?: unknown }
+  if (kind !== 'connect' && kind !== 'login') return null
+  if (typeof nonce !== 'string' || !HEX_256_PATTERN.test(nonce)) return null
+  if (typeof url !== 'string') return null
+  let target: URL
+  try {
+    target = new URL(url)
+  } catch {
+    return null
+  }
+  const backendOrigin = `${window.location.protocol}//${getBackendHost()}`
+  if (target.origin !== backendOrigin || !target.pathname.startsWith('/gatekeeper/')) return null
+  return { handoff: { kind, nonce }, url: target.href }
 }
 
 /**
@@ -102,10 +153,10 @@ let lastConnectPopup: Window | null = null
 /**
  * Opens a connect / reconnect / ensure-resources flow as a disowned popup carrying the flow's
  * nonce (see `openDisownedPopup`). The popup redeems the ticket itself on ConnectHandoffPage; the
- * account arrives in this tab through `subscribeConnectedAccounts()`. Throws when the browser
- * blocked the popup.
+ * account arrives in this tab through `subscribeConnectedAccounts()`. Returns null when the browser
+ * gave no handle on the popup.
  */
-export function openConnectWindow(flow: ConnectFlowStart): Window {
+export function openConnectWindow(flow: ConnectFlowStart): Window | null {
   if (lastConnectPopup) {
     try { lastConnectPopup.close() } catch { /* cross-origin or already gone */ }
   }

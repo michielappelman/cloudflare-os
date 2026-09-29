@@ -2,8 +2,8 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  HANDOFF_KEY, HANDOFF_PATH, openConnectWindow, readPopupHandoff, ticketFromHandoffFragment,
-  uniquePopupName,
+  getBackendHost, HANDOFF_KEY, HANDOFF_PATH, openConnectWindow, readPopupHandoff, readPopupStart,
+  START_PATH, ticketFromHandoffFragment, uniquePopupName,
 } from './connectHandoff'
 import { createRouter } from './router'
 
@@ -82,24 +82,57 @@ describe('openConnectWindow', () => {
     expect(second.location.replace).toHaveBeenCalledExactlyOnceWith('https://gk.example/two')
   })
 
-  it('tells the user when the browser blocked the popup', () => {
-    vi.spyOn(window, 'open').mockReturnValue(null)
+  it('sends the popup to the start page by name when the browser returns no handle', () => {
+    // Some browsers (Orion) open the popup but return null, as if it had been blocked.
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
 
-    expect(() => openConnectWindow({ url: 'https://gk.example/connect', nonce: NONCE }))
-      .toThrow('Pop-up blocked. Please allow pop-ups and try again.')
+    expect(openConnectWindow({ url: 'https://gk.example/connect', nonce: NONCE })).toBeNull()
+    expect(open).toHaveBeenCalledTimes(2)
+    const [[, name], [startUrl, sameName, features]] = open.mock.calls
+    expect(sameName).toBe(name)
+    expect(features).toBe(FEATURES)
+    expect(String(startUrl).startsWith(`${START_PATH}#`)).toBe(true)
+    expect(JSON.parse(decodeURIComponent(String(startUrl).slice(START_PATH.length + 1))))
+      .toEqual({ kind: 'connect', nonce: NONCE, url: 'https://gk.example/connect' })
+    expect(sessionStorage.length).toBe(0)
   })
 
-  it('closes the popup and throws when it refuses the storage write, starting nothing', () => {
-    // Without the nonce the flow could never complete, so the user hears it now, not after the
-    // provider's consent screen.
+  it('sends the popup to the start page when it refuses the storage write', () => {
     const popup = fakePopup()
     popup.sessionStorage.setItem.mockImplementation(() => { throw new DOMException('denied', 'SecurityError') })
     vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
 
-    expect(() => openConnectWindow({ url: 'https://gk.example/connect', nonce: NONCE }))
-      .toThrow(/blocks storage in pop-ups/)
-    expect(popup.close).toHaveBeenCalledOnce()
-    expect(popup.location.replace).not.toHaveBeenCalled()
+    expect(openConnectWindow({ url: 'https://gk.example/connect', nonce: NONCE })).toBe(popup)
+    expect(popup.opener).toBeNull()
+    expect(popup.close).not.toHaveBeenCalled()
+    expect(popup.location.replace).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(new RegExp(`^${START_PATH}#`)))
+  })
+})
+
+describe('readPopupStart', () => {
+  const gatekeeperUrl = () => `${window.location.protocol}//${getBackendHost()}/gatekeeper/kagi/x`
+  const fragment = (value: unknown) => `#${encodeURIComponent(JSON.stringify(value))}`
+
+  it('returns the handoff and URL for a flow under /gatekeeper/ on the backend origin', () => {
+    expect(readPopupStart(fragment({ kind: 'connect', nonce: NONCE, url: gatekeeperUrl() })))
+      .toEqual({ handoff: { kind: 'connect', nonce: NONCE }, url: gatekeeperUrl() })
+  })
+
+  it.each([
+    ['another origin', { kind: 'connect', nonce: NONCE, url: 'https://evil.example/gatekeeper/x' }],
+    ['a path outside /gatekeeper/', { kind: 'connect', nonce: NONCE, url: `${window.location.protocol}//${getBackendHost()}/api` }],
+    ['a javascript: URL', { kind: 'connect', nonce: NONCE, url: 'javascript:alert(1)' }],
+    ['an unknown kind', { kind: 'other', nonce: NONCE, url: 'https://x.example/gatekeeper/x' }],
+    ['a malformed nonce', { kind: 'login', nonce: 'nope', url: 'https://x.example/gatekeeper/x' }],
+  ])('rejects %s', (_label, value) => {
+    expect(readPopupStart(fragment(value))).toBeNull()
+  })
+
+  it('rejects a fragment that is not JSON', () => {
+    expect(readPopupStart('#%zz')).toBeNull()
+    expect(readPopupStart('#not-json')).toBeNull()
+    expect(readPopupStart('')).toBeNull()
   })
 })
 
@@ -164,6 +197,13 @@ describe('ticketFromHandoffFragment', () => {
     ['a bare #', '#'],
   ])('rejects %s', (_label, hash) => {
     expect(ticketFromHandoffFragment(hash)).toBeNull()
+  })
+})
+
+describe('START_PATH', () => {
+  it('is a path the SPA routes', () => {
+    expect(START_PATH).toBe('/connect/start')
+    expect(createRouter().routesByPath[START_PATH]).toBeDefined()
   })
 })
 
