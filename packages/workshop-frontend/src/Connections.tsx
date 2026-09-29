@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Dialog, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
+  ArrowsClockwise,
   Pencil,
   Trash,
   Blueprint,
@@ -21,7 +22,34 @@ import {
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
+import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { openConnectWindow } from './connectHandoff'
+import { logRpcFailure } from './rpcErrors'
 import { isImeComposing } from './keyboardEvent'
+
+// The viewer's own connected accounts, as far as this panel needs them: enough to offer a
+// reconnect on the rows whose connection came from one of them.
+interface ViewerAccount {
+  id: number
+  vendorId: string
+  name: string
+  credentialsValid: boolean
+}
+
+/**
+ * The viewer's account a binding's connection was created from, if it can be told. The backend
+ * reports `accountId` only to the user who created the connection. Connections created before that
+ * was recorded carry none; for those, the viewer's one account of the same vendor is the only
+ * candidate worth offering -- with two or more there is no telling which, so none is offered.
+ */
+function accountForBinding(
+    binding: GadgetBindingInfo, accounts: Map<number, ViewerAccount>): ViewerAccount | undefined {
+  if (binding.accountId !== undefined) return accounts.get(binding.accountId)
+  const vendorId = binding.vendorId?.toLowerCase()
+  if (!vendorId) return undefined
+  const sameVendor = [...accounts.values()].filter((a) => a.vendorId.toLowerCase() === vendorId)
+  return sameVendor.length === 1 ? sameVendor[0] : undefined
+}
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
@@ -54,7 +82,51 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [deleteHookTarget, setDeleteHookTarget] = useState<{ id: number; title: string } | null>(null)
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
+  const [accounts, setAccounts] = useState<Map<number, ViewerAccount>>(new Map())
+  const [reconnectingAccountId, setReconnectingAccountId] = useState<number | null>(null)
   const toasts = useKumoToastManager()
+
+  // Live, so a row's expired marker clears as soon as a reconnect popup completes.
+  useEffect(() => {
+    let cancelled = false
+    const accountMap = new Map<number, ViewerAccount>()
+    const subscriber = new AccountsSubscriberAdapter({
+      add({ id, description, vendor, credentialsValid, vendorId }) {
+        if (cancelled) return
+        const name = description.uniqueName
+          ? `${description.displayName} / ${description.uniqueName}`
+          : description.displayName ?? vendor.displayName
+        accountMap.set(id, { id, vendorId, name, credentialsValid })
+        setAccounts(new Map(accountMap))
+      },
+      remove(id) {
+        if (cancelled) return
+        accountMap.delete(id)
+        setAccounts(new Map(accountMap))
+      },
+    })
+    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    subscription.catch((err) => {
+      if (cancelled) return
+      logRpcFailure('Failed to subscribe to connected accounts:', err)
+    })
+    return () => {
+      cancelled = true
+      subscription[Symbol.dispose]()
+    }
+  }, [authenticatedApi])
+
+  const handleReconnect = async (accountId: number) => {
+    setReconnectingAccountId(accountId)
+    try {
+      openConnectWindow(await authenticatedApi.reconnectAccount(accountId))
+    } catch (err) {
+      console.error('Failed to reconnect account:', err)
+      toasts.add({ title: 'Failed to reconnect account', variant: 'error' })
+    } finally {
+      setReconnectingAccountId(null)
+    }
+  }
 
   const loadGatekeepers = async () => {
     try {
@@ -243,6 +315,8 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                 // Still provisional to the open chat (see GadgetBindingInfo.chatId). Blueprint
                 // annotations are excluded, since a blueprint only ever exports permanent edges.
                 const isPending = gk.chatId !== undefined
+                const account = accountForBinding(gk, accounts)
+                const expired = account !== undefined && !account.credentialsValid
 
                 return (
                   <div
@@ -320,10 +394,25 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                             )}
                           </p>
                           <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+                            {expired && (
+                              <span className="text-kumo-danger">Credentials expired &middot; </span>
+                            )}
                             Referenced in code as: <span className="font-mono text-kumo-subtle">{gk.name}</span>
                           </p>
                         </div>
                         <div className="ml-auto flex shrink-0 items-center gap-1">
+                          {account && (
+                            <Tooltip content={`Reconnect ${account.name}`} asChild>
+                              <WorkshopIconButton
+                                onClick={() => handleReconnect(account.id)}
+                                disabled={reconnectingAccountId === account.id}
+                                aria-label={`Reconnect ${account.name}`}
+                                className={expired ? '!text-kumo-danger' : ''}
+                              >
+                                <ArrowsClockwise size={14} />
+                              </WorkshopIconButton>
+                            </Tooltip>
+                          )}
                           <Tooltip content="Edit name used in code" asChild>
                             <WorkshopIconButton
                               onClick={() => handleEditStart(gk.name)}

@@ -4073,6 +4073,14 @@ export type GadgetBindingInfo = {
   vendorId?: string;
 
   /**
+   * The caller's connected account (as in subscribeConnectedAccounts()) that the target
+   * connection was created from, so the UI can offer reconnectAccount() for it. Present only when
+   * the caller is the user who created the connection, and only for connections created since
+   * this was recorded.
+   */
+  accountId?: number;
+
+  /**
    * If present, this binding is still provisional to the given chat (which is necessarily the
    * `chatId` passed to listBindings(); edges pending in other chats are never listed). It becomes
    * permanent when the user accepts that chat's changes through the message that recorded it, and
