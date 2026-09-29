@@ -1,5 +1,5 @@
 import { logRpcFailure } from '../rpcErrors'
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import {
@@ -27,19 +27,8 @@ import { useSiteName } from '../ServerConfigContext'
 import { AccountsSubscriberAdapter } from '../accountsSubscriber'
 import { openConnectWindow } from '../connectHandoff'
 
-interface GatekeepersSearch {
-  // A connected account to open the manage modal for, e.g. from a gadget's Connections tab, which
-  // sends the user here to reconnect it. Account ids start at 0, so 0 is not "absent".
-  account?: number
-}
-
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
-  validateSearch: (search: Record<string, unknown>): GatekeepersSearch => {
-    const account = typeof search.account === 'string' && search.account !== ''
-      ? Number(search.account) : search.account
-    return typeof account === 'number' && Number.isInteger(account) ? { account } : {}
-  },
 })
 
 interface AccountEntry {
@@ -459,8 +448,6 @@ function ConnectorsPage() {
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
-  const { account: requestedAccountId } = Route.useSearch()
-  const navigate = useNavigate()
 
   const [search, setSearch] = useState('')
   const [view, setView] = useState<'grid' | 'list'>(() => {
@@ -571,18 +558,6 @@ function ConnectorsPage() {
   const handleOpenManage = (accountId: number) => {
     setModalTarget({ kind: 'manage', accountId })
   }
-
-  // Deep link (?account=<id>): open that account's manage modal once the lists it needs are in,
-  // then drop the parameter so closing the modal, or reloading, doesn't reopen it.
-  useEffect(() => {
-    if (requestedAccountId === undefined || !accountsLoaded || !vendorsLoaded) return
-    if (accounts.some((a) => a.id === requestedAccountId)) {
-      handleOpenManage(requestedAccountId)
-    } else {
-      toasts.add({ title: 'That account is no longer connected', variant: 'warning' })
-    }
-    void navigate({ to: '/gatekeepers', search: {}, replace: true })
-  }, [requestedAccountId, accountsLoaded, vendorsLoaded])
 
   const handleCloseModal = () => {
     setModalTarget(null)

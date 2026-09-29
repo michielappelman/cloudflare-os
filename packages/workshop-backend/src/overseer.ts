@@ -262,12 +262,6 @@ type GatekeeperRecord = {
   // Records how this gatekeeper was originally created, enabling blueprint metadata derivation.
   creationSpec?: GatekeeperCreationSpec;
 
-  // The connected account this gatekeeper was created from, and whose user DO holds it. Kept off
-  // `creationSpec` on purpose: that is readable by anyone holding the connection (getCreationSpec),
-  // and account ids are only meaningful to -- and only usable by -- the user who owns them.
-  // Absent on records created before this was tracked, and on vendorless/ambient gatekeepers.
-  connectedAccount?: { userId: string; accountId: number };
-
   // OBSOLETE: Before we had support for multiple gadgets per workspace, the binding name and
   // blueprint annotation information lived on the GatekeeperRecord. These properties continue
   // to be declared only to support migrating them away. The version 0 -> 1 migration copies
@@ -5447,15 +5441,13 @@ class OverseerImpl implements AgentHooks {
   // the collaborator-facing mints, omitted for the owner's and for internal callers (see
   // GadgetClientImpl).
   async addGatekeeper(
-      cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec, joinAs?: SessionKind,
-      connectedAccount?: GatekeeperRecord["connectedAccount"])
+      cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec, joinAs?: SessionKind)
       : Promise<GatekeeperClient<any>> {
     let id = this.allocateWorkpieceId();
     let gatekeeperRecord: GatekeeperRecord = {
       id,
       class: cls,
       creationSpec,
-      ...(connectedAccount ? {connectedAccount} : {}),
     };
 
     // The record is published only once, below, after describe() resolves -- the facet takes the
@@ -11057,8 +11049,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       resourceUrl,
       typeUrlPattern,
     };
-    let result = await this.impl.addGatekeeper(cls, creationSpec, this.#mintedCapabilityKind(),
-        {userId: this.clientUserId, accountId});
+    let result = await this.impl.addGatekeeper(cls, creationSpec, this.#mintedCapabilityKind());
     await this.recordConnectionCreated(result, "gatekeeper", vendorId);
     return result;
   }
@@ -12587,11 +12578,6 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
         vendorId: gatekeeper?.creationSpec?.type === "gatekeeper"
             ? gatekeeper.creationSpec.vendorId
             : undefined,
-        // Only to the user who connected it: an account id means nothing in anyone else's
-        // account list, and only its owner can reconnect it.
-        ...(gatekeeper?.connectedAccount?.userId === this.clientUserId
-            ? {accountId: gatekeeper.connectedAccount.accountId}
-            : {}),
         ...(edge.pending ? {chatId: edge.pending.chatId} : {}),
       };
     });
