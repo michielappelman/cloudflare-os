@@ -4074,18 +4074,11 @@ export type GadgetBindingInfo = {
 
   /**
    * The caller's connected account (as in subscribeConnectedAccounts()) that the target
-   * connection was created from, so the UI can offer reconnectAccount() for it. Present only when
-   * the caller is the user who created the connection, and only for connections created since
-   * this was recorded.
+   * connection was created from, so the UI can point the caller at that account, e.g. to reconnect
+   * it. Present only when the caller is the user who created the connection, and only for
+   * connections created since this was recorded.
    */
   accountId?: number;
-
-  /**
-   * True when the target connection is known to have been created from another user's account, so
-   * none of the caller's accounts backs it. Absent when the caller created it (see `accountId`) and
-   * for connections created before this was recorded, whose account is unknown.
-   */
-  connectedByOtherUser?: boolean;
 
   /**
    * If present, this binding is still provisional to the given chat (which is necessarily the

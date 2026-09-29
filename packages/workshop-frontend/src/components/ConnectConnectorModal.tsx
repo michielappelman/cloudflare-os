@@ -170,7 +170,7 @@ export default function ConnectConnectorModal({
           ? accountDescription?.uniqueName
             ? `${accountDisplayName} / ${accountDescription.uniqueName}`
             : accountDisplayName
-          : 'Credentials expired — reconnect to restore access'}
+          : 'Credentials expired; reconnect to restore access'}
       </span>
     </div>
   ) : (

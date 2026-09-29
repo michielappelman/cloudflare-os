@@ -1,6 +1,6 @@
 // GadgetBindingInfo.accountId: a binding reports the connected account its connection was created
-// from, so the Connections tab can offer a reconnect -- but only to the user who connected it.
-// Account ids index one user's own account list, so anyone else gets only connectedByOtherUser.
+// from, so the Connections tab can link to that account -- but only to the user who connected it.
+// Account ids index one user's own account list, so anyone else must not receive it.
 
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { AuthenticatedApi } from "@gadgets/workshop-shared/api";
@@ -68,6 +68,4 @@ it("reports a binding's account to the user who connected it, and to no one else
   const [binding] = (await bobGadget.listBindings()).filter(b => b.name === "TEST_THING");
   expect(binding).toBeDefined();
   expect(binding).not.toHaveProperty("accountId");
-  // Said explicitly, so bob's UI doesn't take it for an untracked connection of his own.
-  expect(binding).toHaveProperty("connectedByOtherUser", true);
 });
