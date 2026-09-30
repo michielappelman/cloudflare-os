@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, PushSubscriptionInfo } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -13,6 +13,7 @@ import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import { base64UrlDecode, checkPushEndpoint, generateVapidKeys, sendPushNotification, type PushNotification, type VapidKeys } from "./web-push.js";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
 
 const logger = createWorkshopLogger("workshop.user");
@@ -206,6 +207,9 @@ type OutputRecord = WorkspaceOutputEntry & {
 // AI Gateway billing state for the optional top-up flow: which Cloudflare account to bill and a
 // cached credit balance. The OAuth tokens themselves live in the connected Cloudflare *gatekeeper*
 // account (vendorId "cloudflare"); billing reads a usable token from there via getUsableAccessToken.
+// A browser this user receives push notifications on (see AuthenticatedApi.addPushSubscription).
+type PushSubscriptionRecord = PushSubscriptionInfo & { createdAt: Date };
+
 type CloudflareBilling = {
   // Selected account, once chosen (auto-selected when the grant sees exactly one).
   accountId?: string;
@@ -265,6 +269,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
         },
       }),
+      pushSubscriptions: collection<PushSubscriptionRecord>()({
+        primaryKey: "endpoint",
+      }),
     },
     singletons: {
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
@@ -296,6 +303,10 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // Stores the current UTC day and the calls made that day; a stale `day` implicitly resets the
       // count. Folds the former standalone RateLimitDO into the user object.
       dailyLlmCount: <{ day: string; count: number } | null>null,
+
+      // This user's VAPID key pair, created on first use. Push subscriptions are bound to its
+      // public key, so it is never rotated: a new key would orphan every subscribed device.
+      pushVapidKeys: <VapidKeys | null>null,
 
       // `passwordHash` value as passed to `login()`, but with an extra round of SHA-256 applied.
       //
@@ -654,6 +665,74 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       profile.commitEmail = email;
     }
     this.storage.profile.put(profile);
+  }
+
+  async getPushPublicKey(): Promise<string> {
+    return (await this.#pushVapidKeys()).publicKey;
+  }
+
+  async #pushVapidKeys(): Promise<VapidKeys> {
+    let keys = this.storage.pushVapidKeys.get();
+    if (keys) return keys;
+    let generated = await generateVapidKeys();
+    // Re-read: a concurrent first call may have stored its own pair while this one generated.
+    keys = this.storage.pushVapidKeys.get() ?? generated;
+    this.storage.pushVapidKeys.put(keys);
+    return keys;
+  }
+
+  async addPushSubscription(subscription: PushSubscriptionInfo): Promise<void> {
+    checkPushEndpoint(subscription.endpoint);
+    let p256dh = base64UrlDecode(subscription.p256dh);
+    if (p256dh.length !== 65 || p256dh[0] !== 4 || base64UrlDecode(subscription.auth).length !== 16) {
+      throw new Error("Not a valid push subscription.");
+    }
+    this.storage.pushSubscriptions.put({
+      endpoint: subscription.endpoint, p256dh: subscription.p256dh, auth: subscription.auth,
+      createdAt: new Date(),
+    });
+  }
+
+  async removePushSubscription(endpoint: string): Promise<void> {
+    this.storage.pushSubscriptions.delete(endpoint);
+  }
+
+  async sendTestNotification(): Promise<number> {
+    return this.notify({
+      title: "Notifications are on",
+      body: "This device will hear when an agent needs your approval or has finished.",
+      url: new URL("/profile", this.env.PUBLIC_BASE_URL ?? "http://localhost/").href,
+      tag: "test",
+    });
+  }
+
+  /**
+   * Sends `notification` to every device the user subscribed, forgetting the ones the push service
+   * reports gone. Resolves to how many accepted it. Called by the user's workspaces.
+   */
+  async notify(notification: PushNotification): Promise<number> {
+    let targets = [...this.storage.pushSubscriptions.list()];
+    if (targets.length === 0) return 0;
+    let keys = await this.#pushVapidKeys();
+    // The VAPID contact: Apple rejects a subject that is neither https: nor mailto:.
+    let subject = this.env.PUBLIC_BASE_URL
+      ? new URL(this.env.PUBLIC_BASE_URL).origin
+      : "mailto:webpush@localhost";
+    let results = await Promise.all(targets.map(target =>
+        sendPushNotification(target, notification, keys, subject)));
+    let sent = 0;
+    for (let [i, result] of results.entries()) {
+      if (result.outcome === "sent") {
+        sent++;
+      } else if (result.outcome === "gone") {
+        this.storage.pushSubscriptions.delete(targets[i].endpoint);
+      } else {
+        logger.warn("push notification not delivered", {
+          event: "push.send.failed", ...(result.status !== undefined ? { statusCode: result.status } : {}),
+        });
+      }
+    }
+    return sent;
   }
 
   async listModels(): Promise<AiChatAuthorInfo[]> {

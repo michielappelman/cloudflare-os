@@ -404,6 +404,19 @@ export const createAuthError = authErrors.create;
 export const getAuthErrorCode = authErrors.getCode;
 
 /**
+ * A browser push subscription, as `PushSubscription.toJSON()` gives it but flattened (see
+ * `AuthenticatedApi.addPushSubscription`).
+ */
+export type PushSubscriptionInfo = {
+  /** The push service URL notifications are delivered to. */
+  endpoint: string;
+  /** The browser's P-256 public key (`keys.p256dh`), base64url. */
+  p256dh: string;
+  /** The browser's authentication secret (`keys.auth`), base64url. */
+  auth: string;
+};
+
+/**
  * One user as listed in the deployment-wide user directory (see
  * `AuthenticatedApi.searchUsers`).
  */
@@ -431,6 +444,25 @@ export interface AuthenticatedApi extends RpcTarget {
    * back to one derived from their user ID. Rejects an address `validateCommitEmail` refuses.
    */
   setOwnCommitEmail(email: string | null): Promise<void>;
+
+  /**
+   * The key the user's push notifications are signed with (VAPID, base64url), to pass as
+   * `applicationServerKey` to `PushManager.subscribe()`. Created on first use.
+   */
+  getPushPublicKey(): Promise<string>;
+
+  /**
+   * Send the user's notifications (an approval waiting, an agent turn finished) to this browser
+   * push subscription as well. Rejects an endpoint that is not a known push service. Adding an
+   * endpoint again replaces its keys.
+   */
+  addPushSubscription(subscription: PushSubscriptionInfo): Promise<void>;
+
+  /** Stop sending notifications to the subscription with this endpoint. */
+  removePushSubscription(endpoint: string): Promise<void>;
+
+  /** Send a test notification to every subscription; resolves to how many accepted it. */
+  sendTestNotification(): Promise<number>;
 
   /**
    * Find other users of this deployment by a case-insensitive substring of
