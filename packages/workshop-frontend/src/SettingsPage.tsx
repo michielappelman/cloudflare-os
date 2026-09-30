@@ -10,6 +10,7 @@ import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
 import { useDocumentTitle } from './useDocumentTitle'
 import { isImeComposing } from './keyboardEvent'
+import { NotificationsSetting } from './features/notifications/NotificationsSetting'
 
 // Shared, on-language control classes (match the rest of the app: Workspaces/Blueprints headers,
 // the gatekeepers toolbar, the command palette). Kept here so the profile page reads as part of the
@@ -359,7 +360,7 @@ export default function SettingsPage() {
       <header className="px-1 pb-2 pt-6 sm:pt-10">
         <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Profile</h1>
         <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-          Manage your account details, avatar, and security.
+          Manage your account details, avatar, notifications, and security.
         </p>
       </header>
 
@@ -486,6 +487,13 @@ export default function SettingsPage() {
                 <Copy size={14} />
               </button>
             </div>
+          </div>
+        </section>
+
+        <section className="flex flex-col gap-3">
+          <SectionLabel>Notifications</SectionLabel>
+          <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+            <NotificationsSetting api={authenticatedApi} />
           </div>
         </section>
 

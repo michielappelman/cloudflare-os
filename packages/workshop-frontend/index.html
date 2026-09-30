@@ -8,6 +8,11 @@
     <meta http-equiv="Content-Security-Policy" content="frame-src srcdoc:;">
 
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- With credentials: behind Cloudflare Access an uncredentialed manifest fetch is redirected to
+         sign-in, and the app can't be installed. -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Cloudflare OS" />
     <title>Cloudflare OS</title>
   </head>
   <body>
