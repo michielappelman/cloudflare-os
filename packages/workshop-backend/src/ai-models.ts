@@ -442,8 +442,52 @@ type AiFetchBinding = {
 
 // pi drives the model's baseUrl, which already names the gateway route on the binding's host,
 // so the binding's fetch passes through unchanged -- no URL rewriting needed.
+//
+// The passthrough is not known to honor `init.signal`, and pi relies on fetch alone to stop a
+// request: without this, stopping an agent waits for the model's next stream event, which a
+// model reasoning silently may not send for minutes. So the abort is applied here, before the
+// response arrives and to its body after.
 function bindingFetch(binding: Ai): FetchFunction {
-  return (input, init) => (binding as unknown as AiFetchBinding).fetch(input, init);
+  return async (input, init) => {
+    let signal = init?.signal ?? undefined;
+    if (!signal) return (binding as unknown as AiFetchBinding).fetch(input, init);
+    signal.throwIfAborted();
+    let aborted = new Promise<never>((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), {once: true});
+    });
+    aborted.catch(() => {});
+    let response = await Promise.race([
+      (binding as unknown as AiFetchBinding).fetch(input, init), aborted]);
+    if (!response.body) return response;
+    let reader = response.body.getReader();
+    // Errors the stream pi is reading (it holds that stream's lock, so it can't be cancelled from
+    // here) and cancels the upstream response.
+    let onAbort = () => {
+      output.error(signal.reason);
+      reader.cancel(signal.reason).catch(() => {});
+    };
+    let output!: ReadableStreamDefaultController<Uint8Array>;
+    let stream = new ReadableStream<Uint8Array>({
+      start(controller) { output = controller; },
+      async pull(controller) {
+        let {done, value} = await reader.read();
+        // After an abort the stream is already errored; the cancelled read has nothing to add.
+        if (signal.aborted) return;
+        if (done) {
+          signal.removeEventListener("abort", onAbort);
+          controller.close();
+        } else {
+          controller.enqueue(value);
+        }
+      },
+      cancel(reason) {
+        signal.removeEventListener("abort", onAbort);
+        return reader.cancel(reason);
+      },
+    });
+    signal.addEventListener("abort", onAbort, {once: true});
+    return new Response(stream, response);
+  };
 }
 
 // Platform free-tier path: route through the deployment's configured AI Gateway (platform-funded).
