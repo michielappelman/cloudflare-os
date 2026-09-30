@@ -58,6 +58,7 @@ import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import styles from "./ChatInterface.module.css";
+import { RoutedModelBadge } from "./RoutedModelBadge";
 import {
   getStoredSelectedModel,
   persistSelectedModel,
@@ -74,6 +75,7 @@ import {
   CapsuleSpecifier,
   AiChatStreamEvent,
   AiToolCall,
+  AiModelRouting,
   SlashCommandId,
   SlashCommandRequest,
   ChatAttachmentHandle,
@@ -1818,6 +1820,9 @@ type ChatDisplayEntry =
       toolCalls?: AiToolCall[];
       toolCallGroups?: ToolCallGroup[];
       lastMessageSequence?: number;
+      // Auto Router choices for the model requests folded into this row, oldest first. Absent
+      // when none were routed.
+      routings?: AiModelRouting[];
     }
   | {
       type: "workRun";
@@ -1827,6 +1832,7 @@ type ChatDisplayEntry =
       toolCallGroups: ToolCallGroup[];
       lastMessageSequence: number;
       lastMessageTimestamp: Date;
+      routings?: AiModelRouting[];
     }
   | {
       type: "savedChanges";
@@ -1844,6 +1850,7 @@ type WorkMessageParts = {
   lastAgentMessageSequence: number | null;
   lastWorkSequence: number;
   lastWorkTimestamp: Date;
+  routings: AiModelRouting[];
 };
 
 function isAssistantMessageWithoutVisibleText(msg: AiChatMessage): msg is Extract<AiChatMessage, { type: "message" }> {
@@ -1869,6 +1876,7 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
       lastAgentMessageSequence: null,
       lastWorkSequence: msg.sequence,
       lastWorkTimestamp: msg.timestamp,
+      routings: [],
     };
   }
 
@@ -1883,6 +1891,7 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
       lastAgentMessageSequence: msg.sequence,
       lastWorkSequence: msg.sequence,
       lastWorkTimestamp: msg.timestamp,
+      routings: msg.routing ? [msg.routing] : [],
     };
   }
 
@@ -1892,6 +1901,7 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
 function appendWorkParts(target: WorkMessageParts, source: WorkMessageParts) {
   target.toolCalls.push(...source.toolCalls);
   target.observations.push(...source.observations);
+  target.routings.push(...source.routings);
   target.lastWorkSequence = source.lastWorkSequence;
   target.lastWorkTimestamp = source.lastWorkTimestamp;
   if (source.lastAgentMessageSequence !== null) {
@@ -2144,6 +2154,7 @@ export function buildChatDisplayEntries(
         lastAgentMessageSequence: initialWorkParts.lastAgentMessageSequence,
         lastWorkSequence: initialWorkParts.lastWorkSequence,
         lastWorkTimestamp: initialWorkParts.lastWorkTimestamp,
+        routings: [...initialWorkParts.routings],
       };
       let j = i + 1;
       while (j < messages.length) {
@@ -2171,6 +2182,7 @@ export function buildChatDisplayEntries(
         ),
         lastMessageSequence: workParts.lastAgentMessageSequence ?? workParts.lastWorkSequence,
         lastMessageTimestamp: workParts.lastWorkTimestamp,
+        ...(workParts.routings.length > 0 ? {routings: workParts.routings} : {}),
       });
 
       i = j;
@@ -2184,6 +2196,7 @@ export function buildChatDisplayEntries(
         lastAgentMessageSequence: msg.sequence,
         lastWorkSequence: msg.sequence,
         lastWorkTimestamp: msg.timestamp,
+        routings: msg.routing ? [msg.routing] : [],
       };
       let j = i + 1;
       while (j < messages.length) {
@@ -2211,6 +2224,7 @@ export function buildChatDisplayEntries(
             outputOf,
           ),
           lastMessageSequence: workParts.lastAgentMessageSequence ?? msg.sequence,
+          ...(workParts.routings.length > 0 ? {routings: workParts.routings} : {}),
         });
         i = j;
         continue;
@@ -2221,6 +2235,7 @@ export function buildChatDisplayEntries(
       type: "message",
       key: `msg-${msg.chatId}-${msg.sequence}`,
       message: msg,
+      ...(msg.type === "message" && msg.routing ? {routings: [msg.routing]} : {}),
     });
     i++;
   }
@@ -5759,6 +5774,7 @@ function ChatInterface({
                                 onFooterRevert={handleRevertChanges}
                               />
                             ))}
+                            {entry.routings && <RoutedModelBadge routings={entry.routings} />}
                             {createdWorkpieces.map((created) => (
                               <CreatedWorkpieceChatCard
                                 key={created.workpieceId}
@@ -5983,6 +5999,8 @@ function ChatInterface({
                                 ))}
                               </div>
                             )}
+
+                            {entry.routings && <RoutedModelBadge routings={entry.routings} />}
                           </div>
                             );
                           })()
