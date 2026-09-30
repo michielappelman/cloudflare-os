@@ -67,6 +67,7 @@ import { reportIssue } from './errorReporting'
 import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
 import { isImeComposing } from './keyboardEvent'
+import { useReportInView } from './features/notifications/useReportInView'
 
 const NO_GADGETS: ReadonlySet<WorkpieceId> = new Set()
 
@@ -798,6 +799,7 @@ export default function GadgetEditor() {
 
   const overseerStub = overseer?.stub ?? null
   const { pending: pendingActions } = useActions(overseerStub)
+  useReportInView(overseerStub)
   // Hook bindings change once in a while; fold the entry stream into a signature over just the
   // bindHook enable states, in state only when it changes, so the refetch below isn't driven at
   // animation rate. listHooks() is the authoritative initial source; entries only trigger
