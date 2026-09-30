@@ -1443,11 +1443,16 @@ const SUGGESTED_MODEL_CATALOG = {
   },
   "anthropic": {
     "claude-opus-5-5": {name: "Claude Opus 5.5", contextWindow: 1000000},
+    "claude-sonnet-5-5": {name: "Claude Sonnet 5.5", contextWindow: 1000000},
     "claude-fable-5-1": {name: "Claude Fable 5.1", contextWindow: 1000000},
   },
   "openai": {
     // pi's GPT-6 catalog reports a 272K window, but these models support 1.05M. Use 272K as the
     // preferred compaction budget, not as the hard context limit.
+    "gpt-6.1-sol": {
+      name: "GPT-6.1 Sol", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
     "gpt-6-sol": {
       name: "GPT-6 Sol", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
@@ -2445,7 +2450,7 @@ export interface Overseer extends RpcTarget {
    * Retry the agent on the given chat. This starts the agent without adding a new user message.
    * The agent will re-process the existing chat history using the specified model.
    *
-   * If an agent is already running, this does nothing.
+   * Throws if an agent is already running on the chat.
    */
   retryAgent(chatId: number, modelId: string): Promise<void>;
 
@@ -2629,6 +2634,19 @@ export type AiChatMetadata = {
 
   /** Total cost of this conversation so far, in dollars, if known. */
   totalCost?: number;
+
+  /**
+   * Prompt tokens this conversation has sent to the model so far, including the ones the
+   * provider read from or wrote to its prompt cache, if known. A running total, like
+   * `totalCost`: compaction does not reset it.
+   */
+  promptTokens?: number;
+
+  /** How many of `promptTokens` the provider read from its prompt cache. */
+  cacheReadTokens?: number;
+
+  /** How many of `promptTokens` the provider wrote to its prompt cache. */
+  cacheWriteTokens?: number;
 
   /**
    * First sequence this chat still replays. Everything before it is covered by a compaction

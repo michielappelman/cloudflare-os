@@ -16,6 +16,7 @@ import { GitStore, commitIdentityForAuthor, filesEqual, gitObjectsCollection, th
 import { GitCacheImpl, WorkspaceGitCache, gitObjectMetadataCollection } from "./git-cache";
 import { migrateCodeLogToGit } from "./git-migration";
 import * as Y from "yjs";
+import type { Usage } from "@earendil-works/pi-ai";
 import {
   LanguageModelGatekeeperProps,
   getModel,
@@ -50,7 +51,8 @@ import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, role
     from "./sharing";
 import { AutoApprovalDrainer, autoApprovalRule } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
-import { createWorkshopLogger, obsContext, traced } from "./observability";
+import { createWorkshopLogger, obsContext } from "./observability";
+import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
@@ -3786,8 +3788,8 @@ class OverseerImpl implements AgentHooks {
         addedBindings: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[],
         worktreeCommits: {worktreeId: WorkpieceId, commit: string, previousHead: string}[],
       },
-      totalTokens?: number, aiGatewayLogId?: string, aiGatewayLogRoute?: AiGatewayLogRoute,
-      estimatedCost?: number): Promise<boolean> {
+      usage?: Usage, aiGatewayLogId?: string,
+      aiGatewayLogRoute?: AiGatewayLogRoute): Promise<boolean> {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) return false;  // chat deleted mid-turn
 
@@ -3913,8 +3915,7 @@ class OverseerImpl implements AgentHooks {
           }
         }
 
-        this.addChatMessages(chatId, author, msgs, totalTokens, aiGatewayLogId,
-                             aiGatewayLogRoute, estimatedCost);
+        this.addChatMessages(chatId, author, msgs, usage, aiGatewayLogId, aiGatewayLogRoute);
         return this.materializeChatChanges(chatId, undefined, {
           author,
           allowDuringTurn: true,
@@ -5481,6 +5482,16 @@ class OverseerImpl implements AgentHooks {
       this.gitCache.convertPushMarksToOnRemote(record.id);
       this.storage.actions.put(record);
     });
+    // Also when a rule applies it: a user's "always approve" answers a pending request that way.
+    this.traceAgentActionApproval(record, "approved");
+  }
+
+  // Traces an approval step for an action an agent turn submitted.
+  traceAgentActionApproval(record: ActionRecord, state: "requested" | "approved" | "denied") {
+    if (record.caller.from !== "agent") return;
+    let chatId = record.caller.chatId;
+    traceToolApproval(this.getChatAgentContext(chatId), this.ctx.id.toString(), chatId,
+        gatekeeperVendorId(this.storage.gatekeepers.get(record.gatekeeperId)), state);
   }
 
   // Apply all currently-eligible pending actions of the given gatekeeper, in ascending id order.
@@ -6106,10 +6117,15 @@ class OverseerImpl implements AgentHooks {
     // Same auto-approval gate the drainer uses, named because awaitDecision uses it too. The drain
     // is deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
     let willAutoApprove = autoApprovalRule(this.storage, gatekeeperId, description) !== undefined;
+    if (!willAutoApprove) this.traceAgentActionApproval(record, "requested");
 
-    // Only agent turns suspend on awaitDecision, and only when a manual decision is pending.
-    // Auto-approved actions keep the seamless behavior the user opted into.
-    if (caller.from === "agent" && description.awaitDecision && !willAutoApprove) {
+    // Only agent turns suspend on awaitDecision, and only when a manual decision is pending: on this
+    // action, or on an earlier one the in-order drain stops at. Auto-approved actions keep the
+    // seamless behavior the user opted into.
+    if (caller.from === "agent" && description.awaitDecision && (!willAutoApprove ||
+        [...this.storage.actions.pendingByGatekeeper.get(gatekeeperId)].some(queued =>
+            queued.type === "action" &&
+            autoApprovalRule(this.storage, gatekeeperId, queued.description) === undefined))) {
       this.#getOrCreateCapturedActions(caller.chatId).awaitDecision = true;
     }
 
@@ -7272,8 +7288,8 @@ class OverseerImpl implements AgentHooks {
       gadgetId: this.ctx.id.toString(),
       chatId,
       modelId: aiModel.profile.id,
-    }, () => traced("agent.run", () => this.#runAgentTurnWithContext(
-        chatId, aiModel, initiator, callbackInitiated, liveChat)));
+    }, () => this.#runAgentTurnWithContext(
+        chatId, aiModel, initiator, callbackInitiated, liveChat));
   }
 
   async #runAgentTurnWithContext(chatId: number, aiModel: UserAiModelRecord,
@@ -7295,63 +7311,71 @@ class OverseerImpl implements AgentHooks {
     });
 
     try {
-      // Reap any provisional gadgets orphaned by a crashed prior turn before snapshotting
-      // history: replay must not see registry records the chat log doesn't back (an unstamped
-      // record's creating step never reached its barrier, so the log holds no trace of it; see
-      // reconcilePendingGadgets). The model then simply re-creates a reaped gadget if it still
-      // wants it.
-      await this.reconcilePendingGadgets(chatId);
+      // The trace span covers the turn's setup and run, not the teardown below, which can start the
+      // chat's next turn.
+      await traceAgentTurn(this.getChatAgentContext(chatId), liveChat.cancelController.signal,
+          async turn => {
+        // Reap any provisional gadgets orphaned by a crashed prior turn before snapshotting
+        // history: replay must not see registry records the chat log doesn't back (an unstamped
+        // record's creating step never reached its barrier, so the log holds no trace of it; see
+        // reconcilePendingGadgets). The model then simply re-creates a reaped gadget if it still
+        // wants it.
+        await this.reconcilePendingGadgets(chatId);
 
-      // Turn-start materialization: live rows recorded before this turn (user edits, for turns
-      // not started via sendChatMessage -- callbacks, resumes) become a durable "changes"
-      // message attributed to their own authors, so the turn's appends never share a batch with
-      // them. (`allowDuringTurn` because the callers set activeAgent before starting us.)
-      this.materializeChatChanges(chatId, undefined, {allowDuringTurn: true});
+        // Turn-start materialization: live rows recorded before this turn (user edits, for turns
+        // not started via sendChatMessage -- callbacks, resumes) become a durable "changes"
+        // message attributed to their own authors, so the turn's appends never share a batch with
+        // them. (`allowDuringTurn` because the callers set activeAgent before starting us.)
+        this.materializeChatChanges(chatId, undefined, {allowDuringTurn: true});
 
-      // Enforce the optional free-tier usage limit before starting the turn, and resolve whether
-      // it bills the owner's own gateway.
-      // When the Cloudflare limits flow is disabled, checkUsageAndBalance() always allows.
-      // (This runs inside the try so the `finally` below still clears the active-agent state and
-      // emits a stream "clear" — otherwise the UI would spin forever on a block.)
-      let byokRouting: UserGatewayRouting | undefined;
-      if (this.ownerId) {
-        let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
-        let usage = await checkUsageAndBalance(this.env, ownerStub);
-        if (!usage.allowed) {
-          this.postAgentErrorMessage(chatId, aiModel.profile,
-              usage.reason ?? "Usage limit reached.", "usage_limit");
-          turnLogger.debug("agent run finished", {
-            event: "agent.run.finished", outcome: "usage_limit",
-            durationMs: Date.now() - startedAt,
-          });
-          return;
+        // Enforce the optional free-tier usage limit before starting the turn, and resolve whether
+        // it bills the owner's own gateway.
+        // When the Cloudflare limits flow is disabled, checkUsageAndBalance() always allows.
+        // (This runs inside the try so the `finally` below still clears the active-agent state and
+        // emits a stream "clear" — otherwise the UI would spin forever on a block.)
+        let byokRouting: UserGatewayRouting | undefined;
+        if (this.ownerId) {
+          let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
+          let usage = await checkUsageAndBalance(this.env, ownerStub);
+          if (!usage.allowed) {
+            turn.setErrorType("usage_limit");
+            this.postAgentErrorMessage(chatId, aiModel.profile,
+                usage.reason ?? "Usage limit reached.", "usage_limit");
+            turnLogger.debug("agent run finished", {
+              event: "agent.run.finished", outcome: "usage_limit",
+              durationMs: Date.now() - startedAt,
+            });
+            return;
+          }
+          // Free tier exhausted but the user can continue via their own Cloudflare gateway: route
+          // inference through it so the usage bills their account. checkUsageAndBalance already
+          // resolved the routing (reusing its connection lookup), so we don't decrypt the token
+          // again.
+          if (usage.shouldUseByok) {
+            byokRouting = usage.byokRouting;
+            if (byokRouting) byokOwnerStub = ownerStub;
+          }
         }
-        // Free tier exhausted but the user can continue via their own Cloudflare gateway: route
-        // inference through it so the usage bills their account. checkUsageAndBalance already
-        // resolved the routing (reusing its connection lookup), so we don't decrypt the token again.
-        if (usage.shouldUseByok) {
-          byokRouting = usage.byokRouting;
-          if (byokRouting) byokOwnerStub = ownerStub;
-        }
-      }
 
-      let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
-      let chosenModel = getModel(
-          this.env, aiModel.config, initiator, {
-            sessionAffinity,
-            userGateway: byokRouting,
-            metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
-          });
+        let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
+        let chosenModel = getModel(
+            this.env, aiModel.config, initiator, {
+              sessionAffinity,
+              userGateway: byokRouting,
+              metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
+            });
+        turn.setModel(chosenModel.model);
 
-      let controller = liveChat.cancelController;
-      controller.signal.throwIfAborted();
+        let controller = liveChat.cancelController;
+        controller.signal.throwIfAborted();
 
-      await runAgent(
-          this, chosenModel, chatId, aiModel.profile, controller.signal, initiator, aiModel.config);
-      if (!controller.signal.aborted) this.#notifyTurnEnded(chatId, false);
-      turnLogger.debug("agent run finished", {
-        event: "agent.run.finished", outcome: "ok",
-        durationMs: Date.now() - startedAt,
+        await runAgent(
+            this, chosenModel, chatId, aiModel.profile, controller.signal, initiator, aiModel.config);
+        if (!controller.signal.aborted) this.#notifyTurnEnded(chatId, false);
+        turnLogger.debug("agent run finished", {
+          event: "agent.run.finished", outcome: "ok",
+          durationMs: Date.now() - startedAt,
+        });
       });
     } catch (err: unknown) {
       // A failed model request surfaces as AgentTurnError (pi reports provider failures as data;
@@ -8599,8 +8623,8 @@ class OverseerImpl implements AgentHooks {
 
   addChatMessages(chatId: number, author: AiChatAuthorInfo,
         msgs: AiChatMessageBodyWithModelData[],
-        totalTokens?: number, aiGatewayLogId?: string,
-        aiGatewayLogRoute?: AiGatewayLogRoute, estimatedCost?: number): void {
+        usage?: Usage, aiGatewayLogId?: string,
+        aiGatewayLogRoute?: AiGatewayLogRoute): void {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
       // Chat thread deleted?
@@ -8689,8 +8713,12 @@ class OverseerImpl implements AgentHooks {
       }
     }
 
-    if (totalTokens !== undefined) {
-      meta.totalTokens = totalTokens;
+    if (usage !== undefined) {
+      meta.totalTokens = usage.totalTokens;
+      meta.promptTokens =
+          (meta.promptTokens ?? 0) + usage.input + usage.cacheRead + usage.cacheWrite;
+      meta.cacheReadTokens = (meta.cacheReadTokens ?? 0) + usage.cacheRead;
+      meta.cacheWriteTokens = (meta.cacheWriteTokens ?? 0) + usage.cacheWrite;
     }
 
     meta.lastActive = this.getChatTimestamp();
@@ -8699,11 +8727,11 @@ class OverseerImpl implements AgentHooks {
     if (aiGatewayLogId && aiGatewayLogRoute) {
       // Best-effort UI accounting only. The log ID is not persisted, so a DO restart can lose
       // this update. Do not use this total as a billing source of truth.
-      void this.#getCostFromAiGateway(chatId, aiGatewayLogRoute, aiGatewayLogId, estimatedCost);
-    } else if (estimatedCost) {
+      void this.#getCostFromAiGateway(chatId, aiGatewayLogRoute, aiGatewayLogId, usage?.cost.total);
+    } else if (usage?.cost.total) {
       // No AI Gateway log to consult (direct provider access, or a gateway response that didn't
       // surface a log id): fall back to the caller's catalog-priced estimate.
-      this.#addChatCost(chatId, estimatedCost);
+      this.#addChatCost(chatId, usage.cost.total);
     }
   }
 
@@ -8887,6 +8915,16 @@ class OverseerImpl implements AgentHooks {
       : {actions: number[], accessedGadget: boolean, awaitDecision: boolean} | undefined {
     let result = this.#capturedActions.get(chatId);
     this.#capturedActions.delete(chatId);
+    // Submission latched this, but the user may decide while the tool still runs, before the step's
+    // action cards exist for an approval to resume from. So stop only for an awaited action that is
+    // still pending, or was rejected (which ends the turn).
+    if (result) {
+      result.awaitDecision &&= result.actions.some(id => {
+        let record = this.storage.actions.get(id);
+        return record?.type === "action" && record.description.awaitDecision &&
+            record.state !== "approved";
+      });
+    }
     return result;
   }
 
@@ -11329,12 +11367,37 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // If this was an awaited agent action, resume only after all awaited actions in the turn are
     // approved. If applyPendingAction throws, the action stays pending and the turn stays suspended.
     if (action.caller.from === "agent" && action.description.awaitDecision) {
-      await this.#maybeResumeAfterActionDecision(action.caller.chatId);
+      await this.#maybeResumeAfterActionDecision(action.caller.chatId, action.id);
     }
 
     // Clearing this manual gate may unblock later auto-eligible pending actions on the same
     // gatekeeper, so cascade a drain (in-order) once this one is applied.
-    this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(action.gatekeeperId));
+    this.impl.ctx.waitUntil(this.#drainAutoApprovalsAndResume(action.gatekeeperId));
+  }
+
+  // A drain can decide an agent turn's last awaited action, which must resume that turn just as a
+  // manual approval does.
+  async #drainAutoApprovalsAndResume(gatekeeperId: WorkpieceId): Promise<void> {
+    // Snapshot every awaited action, even auto-eligible ones that didn't suspend their turn: a turn
+    // suspended on a manual action can also be waiting on them. Accepted cost: one applied here
+    // (e.g. a retried auto-apply failure) can resume a turn that never suspended.
+    let awaited = new Map<number, number>();  // action id -> chat id
+    for (let record of this.impl.storage.actions.pendingByGatekeeper.get(gatekeeperId)) {
+      if (record.type === "action" && record.caller.from === "agent" &&
+          record.description.awaitDecision) {
+        awaited.set(record.id, record.caller.chatId);
+      }
+    }
+    await this.impl.drainAutoApprovals(gatekeeperId);
+    // No caller awaits a drain, so log each failed resume rather than letting it end the loop.
+    for (let [id, chatId] of awaited) {
+      if (this.impl.storage.actions.get(id)?.state !== "approved") continue;
+      await this.#maybeResumeAfterActionDecision(chatId, id).catch(error => {
+        this.impl.logger.error("failed to resume agent after auto-approval", {
+          event: "agent.resume.failed", chatId, error,
+        });
+      });
+    }
   }
 
   async listHooks(): Promise<BoundHookInfo[]> {
@@ -11408,9 +11471,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.impl.deleteHook(id);
   }
 
-  // Resume a turn suspended on awaitDecision once all awaited actions from that turn are approved.
-  // Scoping to the current turn prevents older rejected actions from blocking future resumes.
-  async #maybeResumeAfterActionDecision(chatId: number): Promise<void> {
+  // Resume a turn suspended on awaitDecision once approving `approvedId` leaves all of that turn's
+  // awaited actions approved. Scoping to the current turn keeps older actions out of it: a rejected
+  // one can't block future resumes, and approving one can't restart a newer turn.
+  async #maybeResumeAfterActionDecision(chatId: number, approvedId: number): Promise<void> {
     let awaited: (ActionRecord & {type: "action"})[] = [];
     for (let msg of this.impl.storage.chats.list(
         {prefix: `${keyString(chatId)}.`, reverse: true})) {
@@ -11432,7 +11496,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     awaited.reverse();  // Present titles chronologically.
 
     // Only resume when every awaited action in the turn has been decided and all were approved.
-    if (awaited.length === 0) return;                       // No awaited action in current turn.
+    if (!awaited.some(r => r.id === approvedId)) return;    // Approved an older turn's action.
     if (awaited.some(r => r.state === "pending")) return;   // Still waiting on a decision.
     if (awaited.some(r => r.state === "rejected")) return;  // Denial leaves the turn ended.
 
@@ -11480,9 +11544,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.gitCache.clearPushMarks(action.id);
       this.impl.storage.actions.put(action);
     });
+    this.impl.traceAgentActionApproval(action, "denied");
 
     // Deny leaves the turn ended, like denyConnectionRequest. The rejected record also prevents a
-    // sibling approval from resuming this turn.
+    // sibling approval from resuming this turn. Like an approval, though, clearing this manual gate
+    // may unblock later auto-eligible pending actions, whose turns do resume.
+    this.impl.ctx.waitUntil(this.#drainAutoApprovalsAndResume(action.gatekeeperId));
   }
 
   // Enable auto-approval of actions carrying `actionKind` on the given gatekeeper. Stores the
@@ -11503,7 +11570,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       enabledBy: profile,
     });
     // Apply the currently-visible pending action(s) with this tag right away.
-    this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(gatekeeperId));
+    this.impl.ctx.waitUntil(this.#drainAutoApprovalsAndResume(gatekeeperId));
   }
 
   // Remove the auto-approval rule for `tag` on the given gatekeeper, so future matching actions
