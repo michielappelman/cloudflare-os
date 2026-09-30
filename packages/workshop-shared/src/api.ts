@@ -1919,6 +1919,12 @@ export type AgentSpawnerConfig = {
  * blueprint listing. Per-gadget operations live on the GadgetClient sub-capability (see
  * createGadget()/getGadget()).
  */
+/**
+ * How long an `Overseer.reportInView(true)` counts. Clients repeat the report well within this
+ * while their page stays in view.
+ */
+export const IN_VIEW_REPORT_TTL_MS = 90_000;
+
 export interface Overseer extends RpcTarget {
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
@@ -1940,6 +1946,14 @@ export interface Overseer extends RpcTarget {
    * A viewer is present for the lifetime of the openGadget() session.
    */
   subscribeToPresence(subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>>;
+
+  /**
+   * Report whether this session's page is in view (the Page Visibility API). While the owner has
+   * the workspace in view, it sends them no push notifications. A report counts for
+   * `IN_VIEW_REPORT_TTL_MS`, so repeat it while in view: a backgrounded page can be suspended
+   * before it gets to report that it is hidden. Ignored for sessions other than the owner's.
+   */
+  reportInView(inView: boolean): Promise<void>;
 
   /** Change the workspace title. */
   setTitle(title: string): Promise<void>;

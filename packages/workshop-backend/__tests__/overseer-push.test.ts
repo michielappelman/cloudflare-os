@@ -10,6 +10,7 @@ import type { OverseerDurableObject } from "../src/overseer.js";
 import type { UserDurableObject } from "../src/user.js";
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { base64UrlDecode, base64UrlEncode } from "../src/web-push.js";
+import { IN_VIEW_REPORT_TTL_MS } from "@gadgets/workshop-shared/api";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -123,18 +124,36 @@ describe("owner push notifications", () => {
     });
   });
 
-  it("stays quiet while the owner has the workspace open", async () => {
+  it("stays quiet while the owner has the workspace in view", async () => {
     const { overseer, delivered } = await setup();
     await runInDurableObject(overseer, async (instance: OverseerDurableObject) => {
       const impl = getImpl(instance);
-      impl.ownerProfileId = "owner@example.com";
-      impl.joinPresence("owner@example.com", { type: "user", id: "owner@example.com", name: "Owner" }, "build");
+      impl.reportOwnerInView({}, true);
       await impl.submitAction(1, 0, BOOK, { from: "agent", chatId: 3 });
-      // A collaborator viewing does not count as the owner seeing it.
-      impl.joinPresence("guest@example.com", { type: "user", id: "guest@example.com", name: "Guest" }, "build");
     });
     // Give a (wrongly) queued delivery the chance to land before asserting none did.
     await new Promise(resolve => setTimeout(resolve, 200));
     expect(delivered).toHaveLength(0);
+  });
+
+  it("notifies an owner whose open app went to the background", async () => {
+    // iOS freezes a backgrounded web app with its WebSocket still open: the session stays present,
+    // and the page either said it was hidden or simply stopped saying it was in view.
+    for (const leaveView of [
+      (impl: any, session: object) => impl.reportOwnerInView(session, false),
+      (impl: any, session: object) => impl.reportOwnerInView(session, true, Date.now() - IN_VIEW_REPORT_TTL_MS - 1),
+    ]) {
+      const { overseer, delivered } = await setup();
+      await runInDurableObject(overseer, async (instance: OverseerDurableObject) => {
+        const impl = getImpl(instance);
+        impl.ownerProfileId = "owner@example.com";
+        impl.joinPresence("owner@example.com", { type: "user", id: "owner@example.com", name: "Owner" }, "build");
+        const session = {};
+        impl.reportOwnerInView(session, true);
+        leaveView(impl, session);
+        await impl.submitAction(1, 0, BOOK, { from: "agent", chatId: 3 });
+      });
+      await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    }
   });
 });

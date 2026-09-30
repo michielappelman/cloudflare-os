@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, IN_VIEW_REPORT_TTL_MS, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -1655,12 +1655,34 @@ class OverseerImpl implements AgentHooks {
   // ending does not notify a second time (see #notifyTurnEnded).
   #notifiedDecisionChats = new Set<number>();
 
+  // The owner's sessions whose page last reported itself in view (Overseer.reportInView), each
+  // with when that report lapses. Presence can't answer "is the owner looking": iOS freezes a
+  // backgrounded web app without closing its WebSocket, so the session stays present for minutes.
+  #ownerInView = new Map<object, number>();
+
+  reportOwnerInView(session: object, inView: boolean, now = Date.now()) {
+    if (inView) {
+      this.#ownerInView.set(session, now + IN_VIEW_REPORT_TTL_MS);
+    } else {
+      this.#ownerInView.delete(session);
+    }
+  }
+
+  #ownerIsLooking(): boolean {
+    let now = Date.now();
+    for (let [session, until] of this.#ownerInView) {
+      if (until > now) return true;
+      this.#ownerInView.delete(session);
+    }
+    return false;
+  }
+
   // Push `notification` to the owner's devices, opening this workspace (and chat) when tapped.
-  // Skipped while the owner has the workspace open, where the chat and activity already show it.
-  // Best-effort and off the critical path.
+  // Skipped while the owner has the workspace in view, where the chat and activity already show
+  // it. Best-effort and off the critical path.
   #notifyOwner(chatId: number | undefined, notification: {title: string, body: string, tag: string}) {
     if (!this.ownerId || !this.env.PUBLIC_BASE_URL) return;
-    if (this.ownerProfileId !== undefined && this.#presence.has(this.ownerProfileId)) return;
+    if (this.#ownerIsLooking()) return;
     let baseUrl = this.env.PUBLIC_BASE_URL;
     // Inside an async function so even a synchronous throw ends up in the catch: a notification
     // must never fail the agent turn or action that prompted it.
@@ -10811,12 +10833,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   #leavePresence: () => void;
   #leaveOutputsFanout: () => void;
 
+  // Identifies this session in OverseerImpl's record of which owner sessions are in view, once it
+  // has reported (see reportInView).
+  #viewSession: object | undefined;
+
   [Symbol.dispose]() {
     this.#leaveSession();
     this.#leavePresence();
     this.#leaveOutputsFanout();
+    if (this.#viewSession) this.impl.reportOwnerInView(this.#viewSession, false);
     this.notifyClosed();
     this.notifyClosed[Symbol.dispose]();
+  }
+
+  async reportInView(inView: boolean): Promise<void> {
+    if (!this.isOwner) return;
+    this.#viewSession ??= {};
+    this.impl.reportOwnerInView(this.#viewSession, inView);
   }
 
   // Per-session caller identity for the SharingManager.
@@ -12453,6 +12486,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>> {
     return this.#subscriptionLease(this.impl.addPresenceSubscriber(subscriber));
   }
+
+  // Only the owner is notified, and a "use" session is never the owner's.
+  async reportInView(_inView: boolean): Promise<void> {}
 
   // The gadget list is visible to "use" collaborators (v1 shares the whole workspace), and each
   // gadget is exposed through a restricted UseGadgetClientInterface that only permits rendering
