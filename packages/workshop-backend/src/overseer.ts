@@ -1648,7 +1648,59 @@ class OverseerImpl implements AgentHooks {
 
   // Subscribers to roster changes, registered via subscribeToPresence().
   #presenceSubscribers = new Map<object, RpcStub<PresenceSubscriber>>();
+
   #presenceKeyCounter = 0;
+
+  // Chats whose agent turn is suspended on a decision the owner was notified about, so the turn
+  // ending does not notify a second time (see #notifyTurnEnded).
+  #notifiedDecisionChats = new Set<number>();
+
+  // Push `notification` to the owner's devices, opening this workspace (and chat) when tapped.
+  // Skipped while the owner has the workspace open, where the chat and activity already show it.
+  // Best-effort and off the critical path.
+  #notifyOwner(chatId: number | undefined, notification: {title: string, body: string, tag: string}) {
+    if (!this.ownerId || !this.env.PUBLIC_BASE_URL) return;
+    if (this.ownerProfileId !== undefined && this.#presence.has(this.ownerProfileId)) return;
+    let baseUrl = this.env.PUBLIC_BASE_URL;
+    // Inside an async function so even a synchronous throw ends up in the catch: a notification
+    // must never fail the agent turn or action that prompted it.
+    this.ctx.waitUntil((async () => {
+      let url = new URL(`/workspace/${this.ctx.id.toString()}`, baseUrl);
+      if (chatId !== undefined) url.searchParams.set("chat", String(chatId));
+      await this.#ownerUserDo().notify({...notification, url: url.href});
+    })().catch((err: unknown) => this.logger.warn("failed to send push notification", {
+      event: "push.notify.failed", error: err,
+    })));
+  }
+
+  // Notify the owner that an agent turn ended, quoting the start of the agent's last reply. Not
+  // for a turn the user stopped, nor one suspended on a decision already notified.
+  #notifyTurnEnded(chatId: number, failed: boolean) {
+    try {
+      this.#notifyTurnEndedUnsafe(chatId, failed);
+    } catch (err) {
+      this.logger.warn("failed to send push notification", {event: "push.notify.failed", error: err});
+    }
+  }
+
+  #notifyTurnEndedUnsafe(chatId: number, failed: boolean) {
+    if (this.#notifiedDecisionChats.delete(chatId)) return;
+    let reply = "";
+    for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true, limit: 50})) {
+      if (msg.type === "message" && msg.author.type === "agent" && msg.message) {
+        reply = msg.message.replace(/\s+/g, " ").trim();
+        break;
+      }
+      if (msg.type === "message" && msg.author.type === "user") break;
+    }
+    let workspace = this.storage.title.get();
+    this.#notifyOwner(chatId, {
+      title: failed ? `Stopped with an error · ${workspace}` : `Done · ${workspace}`,
+      body: reply ? (reply.length > 180 ? `${reply.slice(0, 179)}…` : reply)
+          : failed ? "The agent ran into an error." : "The agent has finished.",
+      tag: `chat-${this.ctx.id.toString()}-${chatId}`,
+    });
+  }
 
   #effectivePresenceRole(sessions: Map<object, CollaboratorRole>): CollaboratorRole {
     for (let role of sessions.values()) {
@@ -6041,6 +6093,16 @@ class OverseerImpl implements AgentHooks {
 
     if (willAutoApprove) {
       this.ctx.waitUntil(this.drainAutoApprovals(gatekeeperId));
+    } else {
+      let chatId = "chatId" in caller ? caller.chatId : undefined;
+      if (caller.from === "agent" && description.awaitDecision) {
+        this.#notifiedDecisionChats.add(caller.chatId);
+      }
+      this.#notifyOwner(chatId, {
+        title: `Approval needed · ${this.storage.title.get()}`,
+        body: description.title,
+        tag: `approval-${this.ctx.id.toString()}-${actionId}`,
+      });
     }
   }
 
@@ -7264,6 +7326,7 @@ class OverseerImpl implements AgentHooks {
 
       await runAgent(
           this, chosenModel, chatId, aiModel.profile, controller.signal, initiator, aiModel.config);
+      if (!controller.signal.aborted) this.#notifyTurnEnded(chatId, false);
       turnLogger.debug("agent run finished", {
         event: "agent.run.finished", outcome: "ok",
         durationMs: Date.now() - startedAt,
@@ -7302,6 +7365,7 @@ class OverseerImpl implements AgentHooks {
       });
 
       this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
+      if (!liveChat.cancelController.signal.aborted) this.#notifyTurnEnded(chatId, true);
     } finally {
       // If this turn billed the user's own Cloudflare account, refresh their cached balance now (in
       // the background) so the next turn's billing decision reflects the spend just incurred. Runs
