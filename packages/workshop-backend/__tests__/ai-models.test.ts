@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  SUGGESTED_MODELS, type AiChatAuthorInfo, type AiModelConfig,
+  AUTO_ROUTER_MODEL_ID, SUGGESTED_MODELS, type AiChatAuthorInfo, type AiModelConfig,
 } from "@gadgets/workshop-shared/api";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
@@ -113,6 +113,75 @@ describe("getModel AI Gateway routing", () => {
       chatId: 7,
     });
   }, 15000);
+
+  it("routes the Auto Router through the gateway's /compat layer and records its choice",
+      async () => {
+    const handle = getModel(env(), {
+      provider: "cloudflare",
+      model: AUTO_ROUTER_MODEL_ID,
+      apiToken: "ignored-in-gateway-mode",
+    }, INITIATOR, { sessionAffinity: "chat-affinity" });
+
+    expect(handle.model.api).toBe("openai-completions");
+    expect(handle.model.baseUrl).toBe(
+        "https://gateway.ai.cloudflare.com/v1/gateway-account-id/platform-gateway/compat");
+
+    // A successful streamed completion carrying the Auto Router's routing headers.
+    const sse = [
+      {id: "c1", object: "chat.completion.chunk", created: 0, model: "anthropic/claude-sonnet-5-5",
+       choices: [{index: 0, delta: {role: "assistant", content: "hi"}, finish_reason: null}]},
+      {id: "c1", object: "chat.completion.chunk", created: 0, model: "anthropic/claude-sonnet-5-5",
+       choices: [{index: 0, delta: {}, finish_reason: "stop"}]},
+    ].map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
+    const routedFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input as RequestInfo, init);
+      capturedRequests.push({url: request.url, headers: request.headers, body: await request.text()});
+      return new Response(sse, {headers: {
+        "content-type": "text/event-stream",
+        "cf-aig-log-id": "log-1",
+        "cf-aig-routed-model": "anthropic/claude-sonnet-5-5",
+        "cf-aig-routing-reason": "cost_optimal_within_pool",
+        "cf-aig-routing-decision-id": "decision-1",
+      }});
+    }) as typeof fetch;
+
+    const stream = await handle.stream(handle.model, {
+      messages: [{ role: "user", content: "hello", timestamp: 0 }],
+    }, { fetch: routedFetch, maxRetries: 0 });
+    expect((await stream.result()).stopReason).toBe("stop");
+
+    const [request] = capturedRequests;
+    expect(request.url).toBe(
+        "https://gateway.ai.cloudflare.com/v1/gateway-account-id/platform-gateway/compat/" +
+        "chat/completions");
+    expect(JSON.parse(request.body).model).toBe(AUTO_ROUTER_MODEL_ID);
+    // Session affinity pins the router's choice for the rest of the turn.
+    expect(request.headers.get("cf-aig-session-id")).toBe("chat-affinity");
+    expect(handle.lastResponse).toMatchObject({
+      status: 200,
+      aiGatewayLogId: "log-1",
+      routing: {
+        model: "anthropic/claude-sonnet-5-5",
+        reason: "cost_optimal_within_pool",
+        decisionId: "decision-1",
+      },
+    });
+    expect(handle.lastResponse?.durationMs).toBeGreaterThanOrEqual(0);
+  }, 15000);
+
+  it("sends Auto Router session affinity only to the Auto Router", async () => {
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, { sessionAffinity: "affinity" });
+    const request = await captureRequest(handle);
+    expect(request.headers.get("cf-aig-session-id")).toBeNull();
+  }, 15000);
+
+  it("refuses the Auto Router without an AI Gateway", () => {
+    expect(() => getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "cloudflare",
+      model: AUTO_ROUTER_MODEL_ID,
+      apiToken: "direct-token",
+    }, INITIATOR)).toThrow("only available through AI Gateway");
+  });
 
   it("routes Google through the gateway's google-ai-studio passthrough", () => {
     // The @google/genai SDK sends its API key as `x-goog-api-key`, which AI Gateway forwards to

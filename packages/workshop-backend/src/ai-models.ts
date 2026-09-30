@@ -16,8 +16,10 @@ import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
-import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT }
-  from "@gadgets/workshop-shared/api";
+import {
+  AiChatAuthorInfo, AiModelConfig, AiModelRouting, AUTO_ROUTER_MODEL_ID, SUGGESTED_MODELS,
+  WORKERS_AI_OUTPUT_LIMIT,
+} from "@gadgets/workshop-shared/api";
 import { traceChat } from "./agent-tracing.js";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
@@ -102,7 +104,14 @@ export type ModelHandle = {
    * right after the request they care about completes. Turns run requests sequentially, so this
    * is safe.
    */
-  lastResponse?: { status: number; aiGatewayLogId?: string };
+  lastResponse?: {
+    status: number;
+    aiGatewayLogId?: string;
+    /** Auto Router's choice for the request; absent for every other model. */
+    routing?: Pick<AiModelRouting, "model" | "reason" | "decisionId">;
+    /** From sending the request to the end of the response, once the response has ended. */
+    durationMs?: number;
+  };
 };
 
 function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataContext): GatewayMetadata {
@@ -175,7 +184,9 @@ function workersAiCompat(catalog: Model<Api> | undefined): OpenAICompletionsComp
 // offers a unified OpenAI-compat
 // translation layer (/compat), which we deliberately never use: we already speak every
 // provider's native API, and the translation drops provider features pi relies on (extended
-// thinking, Anthropic cache_control prompt caching, the OpenAI Responses API). Billing --
+// thinking, Anthropic cache_control prompt caching, the OpenAI Responses API) -- with one
+// exception: AI Gateway's Auto Router (AUTO_ROUTER_MODEL_ID) exists only on /compat, so choosing it
+// trades those features for per-request model selection. Billing --
 // including unified billing on a user's own gateway -- is orthogonal to which API a request
 // speaks. Returns undefined for providers AI Gateway cannot serve (ollama).
 function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Api> | undefined {
@@ -231,6 +242,22 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         thinkingLevelMap: catalog?.thinkingLevelMap,
       };
     case "cloudflare":
+      if (config.model === AUTO_ROUTER_MODEL_ID) {
+        // The gateway's cross-provider OpenAI-compat layer, the only API the Auto Router serves.
+        // Thinking stays off: the routed model is unknown until the response arrives.
+        return {
+          id: config.model,
+          name: "Auto Router",
+          api: "openai-completions",
+          provider: "cloudflare-ai-gateway",
+          baseUrl: `${gatewayUrl}/compat`,
+          reasoning: false,
+          input: ["text", "image"],
+          cost: ZERO_COST,
+          ...window,
+          compat: {supportsStore: false, supportsDeveloperRole: false},
+        };
+      }
       // Workers AI's own OpenAI-compatible endpoint, exposed through the gateway's workers-ai
       // route. This is Workers AI's native chat API (the same surface as its direct
       // /accounts/{id}/ai/v1 REST endpoint), not the gateway's cross-provider /compat layer.
@@ -314,7 +341,13 @@ function makeHandle(args: HandleArgs): ModelHandle {
       // This request's own response metadata: concurrent requests on one handle overwrite
       // `lastResponse`, but not this.
       let received: ModelHandle["lastResponse"];
+      const startedAt = Date.now();
+      const sessionId = options.sessionId ?? args.sessionAffinity;
       const headers: ProviderHeaders = {
+        // Pins the Auto Router's choice for the rest of a turn (its session affinity).
+        ...(args.model.id === AUTO_ROUTER_MODEL_ID && sessionId !== undefined
+            ? { "cf-aig-session-id": sessionId }
+            : {}),
         ...args.headers,
         ...options.headers,
         ...(args.gatewayMetadata
@@ -338,11 +371,21 @@ function makeHandle(args: HandleArgs): ModelHandle {
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
-        sessionId: options.sessionId ?? args.sessionAffinity,
+        sessionId,
         onResponse: async (response, responseModel) => {
+          const routedModel = getHeader(response.headers, "cf-aig-routed-model");
           received = {
             status: response.status,
             aiGatewayLogId: getHeader(response.headers, "cf-aig-log-id"),
+            ...(routedModel
+                ? {
+                    routing: {
+                      model: routedModel,
+                      reason: getHeader(response.headers, "cf-aig-routing-reason"),
+                      decisionId: getHeader(response.headers, "cf-aig-routing-decision-id"),
+                    },
+                  }
+                : {}),
           };
           handle.lastResponse = received;
           await options.onResponse?.(response, responseModel);
@@ -354,8 +397,12 @@ function makeHandle(args: HandleArgs): ModelHandle {
           return bridgePdfAttachments(args.model.api, replaced ?? payload) ?? replaced;
         },
       };
-      return traceChat(model, () => received,
+      const stream = traceChat(model, () => received,
           () => streamFn(model, normalizeContext(context), merged));
+      void stream.result().then(() => {
+        if (received) received.durationMs = Date.now() - startedAt;
+      });
+      return stream;
     },
   };
   return handle;
@@ -577,6 +624,9 @@ function directAuth(config: AiModelConfig, keyHeader: string): Pick<HandleArgs, 
 
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
 function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
+  if (config.provider === "cloudflare" && config.model === AUTO_ROUTER_MODEL_ID) {
+    throw new Error("The Auto Router is only available through AI Gateway.");
+  }
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {

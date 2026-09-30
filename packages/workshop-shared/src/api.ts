@@ -1398,6 +1398,41 @@ export type RedactedAiModelConfig = Omit<AiModelConfig, "apiToken" | "extraHeade
  */
 export const WORKERS_AI_OUTPUT_LIMIT = 32768;
 
+/**
+ * The model ID that selects AI Gateway's Auto Router, which picks a model per request from the
+ * gateway's eligible pool, balancing expected quality against cost. Listed under the "cloudflare"
+ * provider, and served only through an AI Gateway.
+ * https://developers.cloudflare.com/ai-gateway/features/auto-router/
+ */
+export const AUTO_ROUTER_MODEL_ID = "cloudflare/auto";
+
+/**
+ * How AI Gateway's Auto Router served one model request, as reported by its response headers.
+ * Recorded on the agent message the request produced (`AiChatMessageBody.routing`).
+ */
+export type AiModelRouting = {
+  /** The model that served the request, e.g. "anthropic/claude-sonnet-5-5" (`cf-aig-routed-model`). */
+  model: string;
+
+  /** Why the router chose it, e.g. "cost_optimal_within_pool" (`cf-aig-routing-reason`). */
+  reason?: string;
+
+  /** The routing decision's identifier (`cf-aig-routing-decision-id`). */
+  decisionId?: string;
+
+  /** The AI Gateway log entry for the request (`cf-aig-log-id`). */
+  logId?: string;
+
+  /** Prompt tokens the request consumed, cache reads and writes included. */
+  inputTokens?: number;
+
+  /** Tokens the model generated. */
+  outputTokens?: number;
+
+  /** Wall-clock time from sending the request to the end of the response, in milliseconds. */
+  durationMs?: number;
+};
+
 /** One entry of SUGGESTED_MODELS. */
 type SuggestedModel = {
   name: string;
@@ -1438,6 +1473,12 @@ const SUGGESTED_MODEL_CATALOG = {
     },
     "@cf/deepseek-ai/deepseek-v4-pro-0813": {
       name: "DeepSeek V4 Pro 0813 (Workers AI)", contextWindow: 1048576,
+      outputLimit: WORKERS_AI_OUTPUT_LIMIT,
+    },
+    // The Auto Router's pool mixes providers and models; these limits are conservative enough for
+    // any of them.
+    [AUTO_ROUTER_MODEL_ID]: {
+      name: "Auto Router (AI Gateway)", contextWindow: 262144,
       outputLimit: WORKERS_AI_OUTPUT_LIMIT,
     },
   },
@@ -2995,6 +3036,12 @@ export type AiChatMessageBody = {
 
   /** Messages from an AI agent can invoke tools. */
   toolCalls?: AiToolCall[];
+
+  /**
+   * For an AI agent message produced by AI Gateway's Auto Router (`AUTO_ROUTER_MODEL_ID`): which
+   * model the gateway chose for the request that produced this message, and why.
+   */
+  routing?: AiModelRouting;
 
   /** Attachments that were sent with this message. Actual bytes stored separately. */
   attachments?: ChatAttachmentRef[];
