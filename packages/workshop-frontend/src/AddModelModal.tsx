@@ -103,6 +103,7 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
     // In gateway mode, suggested models are already built-in, so don't list them.
     if (!gatewayMode) {
       for (const [modelId, model] of Object.entries(SUGGESTED_MODELS[provider])) {
+        if (model.hidden) continue
         // The Auto Router only exists behind an AI Gateway.
         if (modelId === AUTO_ROUTER_MODEL_ID) continue
         options.push({
