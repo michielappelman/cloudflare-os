@@ -58,7 +58,13 @@ export const DEFAULT_GATEKEEPER_WRANGLER = {
   rules: textModules(["**/*.txt", "**/*.svg"]),
 } satisfies WranglerExtras;
 
-/** `defineConfig` for one Worker, with the repo-wide compatibility date filled in. */
-export function defineGadgetsWorker(worker: Omit<WorkerConfig, "compatibilityDate">) {
+/**
+ * `defineConfig` for one Worker, with the repo-wide compatibility date filled in. A Worker may set
+ * a later date of its own, e.g. a downstream Gatekeeper already deployed on one: moving a deployed
+ * Worker's date backwards can switch off runtime behaviour it relies on.
+ */
+export function defineGadgetsWorker(
+  worker: Omit<WorkerConfig, "compatibilityDate"> & { compatibilityDate?: string },
+) {
   return defineConfig({ worker: { compatibilityDate: COMPATIBILITY_DATE, ...worker } });
 }
