@@ -62,7 +62,7 @@ afterEach(async () => {
 
 const WORKERS_AI_MODEL: EvalModel = { provider: "cloudflare", model: "@cf/zai-org/glm-5.2" };
 const GEMINI: EvalModel = { provider: "google", model: "gemini-3.6-flash" };
-const CLAUDE: EvalModel = { provider: "anthropic", model: "claude-opus-5-5" };
+const CLAUDE: EvalModel = { provider: "anthropic", model: "claude-sonnet-5" };
 const DIRECT: LocalModelAccess = { kind: "direct", accountId: "account-id", apiToken: "token" };
 const BINDING: LocalModelAccess = {
   kind: "gateway", gateway: "gateway", accountId: "account-id", transport: "binding",

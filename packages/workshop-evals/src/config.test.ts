@@ -12,9 +12,9 @@ it("leaves an outer margin for setup and cleanup", () => {
 
 it("accepts model and trial overrides", () => {
   expect(evalMatrix({
-    WORKSHOP_EVAL_MODELS: " @cf/zai-org/glm-5.2, claude-opus-5-5 ",
+    WORKSHOP_EVAL_MODELS: " @cf/zai-org/glm-5.2, claude-sonnet-5 ",
     WORKSHOP_EVAL_TRIALS: "3",
-  })).toEqual({ models: ["@cf/zai-org/glm-5.2", "claude-opus-5-5"], trials: 3 });
+  })).toEqual({ models: ["@cf/zai-org/glm-5.2", "claude-sonnet-5"], trials: 3 });
 });
 
 it("rejects a model that is not in the catalog", () => {
