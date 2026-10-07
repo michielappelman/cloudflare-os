@@ -920,8 +920,10 @@ export interface ConfigItemDetails extends ConfigItemInfo {
   editable: boolean;
 }
 
-/** An automation's configuration, in Home Assistant's own (snake_case) format. Fields not listed
- * here are passed through verbatim. */
+/** An automation's configuration, in Home Assistant's own (snake_case) format. Home Assistant
+ * accepts only these top-level keys: id, alias, description, triggers, conditions, actions, mode,
+ * max, max_exceeded, variables, trigger_variables, initial_state, trace (plus `use_blueprint`
+ * for blueprint-based ones). Automations have NO `icon`. Other keys throw before queueing. */
 export interface AutomationConfig {
   alias?: string;
   description?: string;
@@ -934,7 +936,8 @@ export interface AutomationConfig {
   [key: string]: unknown;
 }
 
-/** A script's configuration, in Home Assistant's own format. */
+/** A script's configuration, in Home Assistant's own format. Top-level keys: alias, description,
+ * icon, sequence, fields, variables, mode, max, max_exceeded, trace. Other keys throw. */
 export interface ScriptConfig {
   alias?: string;
   description?: string;

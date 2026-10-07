@@ -69,6 +69,7 @@ import {
   provisionalId,
   referencedGroupIds,
   slugify,
+  unsupportedConfigKeys,
   withoutId,
   type AssignmentChanges,
   type AuthoringAction,
@@ -2298,6 +2299,8 @@ async function checkItemConfig(
   domain: ConfigItemDomain,
   config: Record<string, unknown>,
 ): Promise<void> {
+  const unsupported = unsupportedConfigKeys(domain, config);
+  if (unsupported) throw new TypeError(unsupported);
   if (domain === "scene") {
     if (typeof config.name !== "string" || !config.name.trim()) {
       throw new TypeError(`A scene needs a non-empty "name".`);

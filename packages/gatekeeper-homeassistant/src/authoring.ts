@@ -355,6 +355,43 @@ export function isSlug(text: string): boolean {
   return text !== "" && slugify(text) === text;
 }
 
+/** Top-level keys Home Assistant accepts per domain (automation/config.py, script/config.py,
+ * homeassistant/scene.py; `mode`/`max`/`max_exceeded` come from make_script_schema). HA
+ * rejects anything else with HTTP 400 when the config is saved, and `validate_config` only
+ * checks triggers, conditions and actions, so the keys are checked here before queueing. */
+const CONFIG_ITEM_KEYS: Record<ConfigItemDomain, readonly string[]> = {
+  automation: [
+    "id", "alias", "description", "trace", "initial_state", "hide_entity",
+    "triggers", "trigger", "conditions", "condition", "actions", "action",
+    "variables", "trigger_variables", "mode", "max", "max_exceeded",
+  ],
+  script: [
+    "alias", "description", "icon", "trace", "fields", "variables", "sequence",
+    "mode", "max", "max_exceeded",
+  ],
+  scene: ["id", "name", "icon", "entities", "metadata"],
+};
+
+/** An error message naming the top-level keys Home Assistant would reject, or undefined.
+ * Blueprint-based items are left to Home Assistant, whose blueprint schema differs. */
+export function unsupportedConfigKeys(
+  domain: ConfigItemDomain,
+  config: Record<string, unknown>,
+): string | undefined {
+  if ("use_blueprint" in config) return undefined;
+  const allowed = CONFIG_ITEM_KEYS[domain];
+  const unsupported = Object.keys(config).filter((key) => !allowed.includes(key));
+  if (unsupported.length === 0) return undefined;
+  const iconHint =
+    domain === "automation" && unsupported.includes("icon")
+      ? " Automations have no icon of their own in Home Assistant."
+      : "";
+  return (
+    `Home Assistant does not accept ${unsupported.map((k) => `"${k}"`).join(", ")} in a ` +
+    `${domain} configuration.${iconHint} Allowed top-level keys: ${allowed.join(", ")}.`
+  );
+}
+
 /** Everything a configuration refers to: services it calls and entities, devices, areas, labels
  * and floors it names. Template strings are not parsed. */
 export interface ConfigReferences {

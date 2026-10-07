@@ -10,6 +10,7 @@ import {
   referencedGroupIds,
   resolveProvisionalIds,
   sameConfig,
+  unsupportedConfigKeys,
   type AuthoringAction,
 } from "../src/authoring";
 import type { RegistrySnapshot } from "../src/homeassistant-api";
@@ -309,5 +310,26 @@ describe("describeAuthoringAction", () => {
       [],
     );
     expect(description).toContain("removed from 1 entity, 1 device and 1 area");
+  });
+});
+
+describe("unsupportedConfigKeys", () => {
+  it("rejects an icon on an automation, which Home Assistant refuses with HTTP 400 on save", () => {
+    expect(unsupportedConfigKeys("automation", { ...porchAutomation, icon: "mdi:alert-circle" }))
+      .toMatch(/"icon".*no icon of their own/);
+  });
+
+  it("accepts the keys each domain's schema allows, legacy singular keys included", () => {
+    expect(unsupportedConfigKeys("automation", { ...porchAutomation, trigger: [], mode: "queued", max: 3 }))
+      .toBeUndefined();
+    expect(unsupportedConfigKeys("script", { alias: "x", icon: "mdi:bed", sequence: [], fields: {} }))
+      .toBeUndefined();
+    expect(unsupportedConfigKeys("scene", { id: "1", name: "x", icon: "mdi:tv", entities: {}, metadata: {} }))
+      .toBeUndefined();
+  });
+
+  it("leaves blueprint-based items to Home Assistant", () => {
+    expect(unsupportedConfigKeys("automation", { use_blueprint: { path: "x.yaml", input: {} }, icon: "x" }))
+      .toBeUndefined();
   });
 });
