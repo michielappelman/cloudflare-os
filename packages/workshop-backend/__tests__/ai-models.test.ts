@@ -1292,7 +1292,7 @@ describe("gateway model reasoning levels", () => {
       ["openai", "gpt-next", ["off", "minimal", "xhigh", "max"]],
       ["google", "gemini-next", ["low", "high", "xhigh"]],
       ["cloudflare", "@cf/moonshotai/kimi-k3", ["off", "high"]],
-      ["cloudflare", "cloudflare/auto", ["low", "high", "max"]],
+      ["cloudflare", "@cf/example/next-model", ["low", "high", "max"]],
     ])("lists the levels stated for %s model %s: %j", (provider, model, stated) => {
       expect(levels(stating({ provider, model }, ...stated))).toEqual(stated);
     });
@@ -1371,7 +1371,7 @@ describe("gateway model reasoning levels", () => {
       ["off", "low"], ["minimal", "low"], ["low", "low"], ["medium", "high"], ["high", "high"],
       ["xhigh", "max"], ["max", "max"],
     ] as const)("clamps level %s to stated effort %s", async (level, reasoning_effort) => {
-      const auto = stating({ provider: "cloudflare", model: "cloudflare/auto" },
+      const auto = stating({ provider: "cloudflare", model: "@cf/example/next-model" },
           "low", "high", "max");
       expect(await parsed({ ...auto, reasoning: level }))
           .toEqual(completionsBody(auto, { reasoning_effort }));
