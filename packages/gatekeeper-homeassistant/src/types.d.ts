@@ -417,7 +417,9 @@ export interface HomeAssistantSession extends RpcTarget {
   //
   // Only items stored by Home Assistant's UI editors (automations.yaml, scripts.yaml,
   // scenes.yaml) can be edited. Items defined elsewhere in YAML are listed and readable but
-  // `saveConfig()` / `delete()` throw for them. Saving needs an admin access token.
+  // `saveConfig()` / `delete()` throw for them. Listing works with any token; reading a config,
+  // `describe()`, every change and all organisation changes need the connected access token to
+  // belong to a Home Assistant administrator, and throw otherwise.
 
   /** List every automation, including ones created by pending (unapproved) actions.
    * @example const automations = await session.listAutomations(); */
