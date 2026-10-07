@@ -49,26 +49,18 @@ import {
 } from "./github-api";
 import { assertIssueSearchResultsInRepo, buildIssueSearchQuery } from "./github-search";
 import {
-  actorFromUser,
-  advertiseCommits,
-  commitDetailsFromGitObject,
-  commitIdsOfPullSummary,
-  commitIdsOfSummary,
-  CommitAdvertisingCursor,
-  isCommitOid,
-  normalizeBranchSummary,
-  normalizeCommitDetails,
-  normalizeCommitSummary,
-  normalizeTagSummary,
-  parseGitCommitPayload,
-} from "./git-commits";
-import {
   MAX_DIFF_BLOB_BYTES,
   changedPathsBetweenTrees,
   diffGitTrees,
   parseGitTreePayload,
   type TreeDiffSource,
-} from "./git-diff";
+} from "@gadgets/gatekeeper-kit/git-diff";
+import { SessionGitCache } from "@gadgets/gatekeeper-kit/cursors";
+import {
+  commitIdsOfSummary,
+  isCommitOid,
+  parseGitCommitPayload,
+} from "@gadgets/gatekeeper-kit/git-objects";
 import {
   GitRefUpdateRejectedError,
   ZERO_OID,
@@ -76,7 +68,16 @@ import {
   pullGitObjectsIntoCache,
   pushGitRefUpdate,
   validateBranchName,
-} from "./git-transport";
+} from "@gadgets/gatekeeper-kit/git-transport";
+import {
+  actorFromUser,
+  commitDetailsFromGitObject,
+  commitIdsOfPullSummary,
+  normalizeBranchSummary,
+  normalizeCommitDetails,
+  normalizeCommitSummary,
+  normalizeTagSummary,
+} from "./git-commits";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
   GitHubActor,
@@ -1198,84 +1199,6 @@ class StreamingCursor<T> extends RpcTarget implements Cursor<T> {
       }
       this.#buffer.push({item: this.#injectedItems[this.#injectedIndex++], injected: true});
     }
-  }
-}
-
-/**
- * RPC wrapper around `CommitAdvertisingCursor` (see git-commits.ts): each page a caller fetches
- * advertises its commit ids to the workspace git cache before it is returned. Owns the `GitCache`
- * stub it is given (a dup of the session's), disposing it with the cursor.
- */
-@validateRpc()
-class AdvertisingCursor<T> extends RpcTarget implements Cursor<T> {
-  #inner: CommitAdvertisingCursor<T>;
-  #cache: RpcStub<GitCache>;
-
-  constructor(inner: Cursor<T>, cache: RpcStub<GitCache>, commitIds: (item: T) => GitOid[]) {
-    super();
-    this.#inner = new CommitAdvertisingCursor(inner, cache, commitIds);
-    this.#cache = cache;
-  }
-
-  async next(): Promise<T[] | null> {
-    return await this.#inner.next();
-  }
-
-  [Symbol.dispose](): void {
-    this.#cache[Symbol.dispose]();
-  }
-}
-
-/**
- * Lazily obtains and owns a session's `GitCache` stub (fetched at most once per session, via
- * `ObservationAuthorizer.getGitCache()`), through which the session advertises the commit ids its
- * reads return -- advertisement is workspace-internal pull-routing metadata, not a read, so no
- * observation accompanies it. A plain helper, deliberately not an `RpcTarget`: the cache stub
- * must never be reachable by the session's callers.
- */
-class SessionGitCache {
-  #approvalQueue: RpcStub<ApprovalQueue>;
-  #cache?: Promise<RpcStub<GitCache>>;
-
-  /** `approvalQueue` is only borrowed; the owning session must outlive this helper. */
-  constructor(approvalQueue: RpcStub<ApprovalQueue>) {
-    this.#approvalQueue = approvalQueue;
-  }
-
-  /**
-   * The session-owned cache stub itself, for callers that need more than advertising (e.g. the
-   * push queue path's ancestry check and pending-commit simulation reads). Borrowed, not
-   * transferred: this helper still owns and disposes it.
-   */
-  stub(): Promise<RpcStub<GitCache>> {
-    return this.#get();
-  }
-
-  #get(): Promise<RpcStub<GitCache>> {
-    this.#cache ??= this.#approvalQueue.getGitCache();
-    return this.#cache;
-  }
-
-  /**
-   * Advertise the given commit ids (deduplicated, in parallel). Values that aren't full commit
-   * ids -- e.g. a provisional pull request's empty branch sha -- are skipped.
-   */
-  async advertise(ids: Iterable<GitOid>): Promise<void> {
-    await advertiseCommits(await this.#get(), ids);
-  }
-
-  /**
-   * Wrap a cursor so that each page it returns advertises its commit ids first. The wrapper holds
-   * its own dup of the cache stub, so it keeps working if the session is disposed before the
-   * cursor is drained.
-   */
-  async wrap<T>(cursor: Cursor<T>, commitIds: (item: T) => GitOid[]): Promise<Cursor<T>> {
-    const cache = await this.#get();
-    return new AdvertisingCursor(cursor, cache.dup(), commitIds);
-  }
-
-  dispose(): void {
-    void this.#cache?.then(cache => cache[Symbol.dispose]()).catch(() => {});
   }
 }
 
@@ -3812,7 +3735,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   /**
    * `Gatekeeper.gitPull()`: fetch the requested objects from this repo over git smart-HTTP
    * (protocol v2) and deposit them in the workspace git cache. The gatekeeper contributes only
-   * protocol framing -- git-transport.ts composes the fetch command from the hints and strips
+   * protocol framing -- the kit's git-transport composes the fetch command from the hints and strips
    * the response down to the raw pack body, which streams into `cache.consumePack()` for
    * overseer-side decoding, hash verification, and storage -- and retains nothing locally.
    *
@@ -5404,7 +5327,7 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     super();
     this.#gatekeeper = gatekeeper;
     this.#approvalQueue = approvalQueue;
-    this.#gitCache = new SessionGitCache(approvalQueue);
+    this.#gitCache = new SessionGitCache(approvalQueue, { withhold: id => gatekeeper.isSimulatedCommitId(id) });
   }
 
   [Symbol.dispose](): void {
@@ -5480,9 +5403,7 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     // withheld from advertising: they are not on GitHub yet, and the hint would outlive a
     // rejection (see GitHubGatekeeperImpl.isSimulatedCommitId). Checked live per page, since a
     // push may be queued while the cursor is being drained.
-    const gatekeeper = this.#gatekeeper;
-    return await this.#gitCache.wrap(cursor, pull =>
-      commitIdsOfPullSummary(pull).filter(id => !gatekeeper.isSimulatedCommitId(id)));
+    return await this.#gitCache.wrap(cursor, commitIdsOfPullSummary);
   }
 
   async searchPullRequests(query: GitHubPullRequestSearch): Promise<Cursor<GitHubPullRequestSummary>> {
@@ -5493,9 +5414,7 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     const cursor = await this.#gatekeeper.searchPullRequests(
       query, query.resultsPerPage ?? 50, await this.#gitCache.stub());
     // Simulated ids withheld from advertising, as in listPullRequests.
-    const gatekeeper = this.#gatekeeper;
-    return await this.#gitCache.wrap(cursor, pull =>
-      commitIdsOfPullSummary(pull).filter(id => !gatekeeper.isSimulatedCommitId(id)));
+    return await this.#gitCache.wrap(cursor, commitIdsOfPullSummary);
   }
 
   async listBranches(options?: GitHubBranchFilter): Promise<Cursor<GitHubBranchSummary>> {
@@ -5508,9 +5427,7 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     // -- is withheld from advertising: it is not on GitHub yet, and the hint would outlive a
     // rejection (see GitHubGatekeeperImpl.isSimulatedCommitId). Checked live per page, since a
     // push may be queued while the cursor is being drained.
-    const gatekeeper = this.#gatekeeper;
-    return await this.#gitCache.wrap(cursor, branch =>
-      gatekeeper.isSimulatedCommitId(branch.headCommit) ? [] : [branch.headCommit]);
+    return await this.#gitCache.wrap(cursor, branch => [branch.headCommit]);
   }
 
   async listTags(options?: GitHubPageOptions): Promise<Cursor<GitHubTagSummary>> {
@@ -5581,9 +5498,7 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
       options, options?.resultsPerPage ?? 50, await this.#gitCache.stub());
     // Pending (queued-push) commits in a simulated listing are withheld from advertising; their
     // GitHub-known parents still advertise.
-    const gatekeeper = this.#gatekeeper;
-    return await this.#gitCache.wrap(cursor, item =>
-      commitIdsOfSummary(item).filter(id => !gatekeeper.isSimulatedCommitId(id)));
+    return await this.#gitCache.wrap(cursor, commitIdsOfSummary);
   }
 }
 
@@ -5691,7 +5606,7 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
 
   constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue>, logicalId: string) {
     super(gatekeeper, approvalQueue, logicalId, "pull");
-    this.#gitCache = new SessionGitCache(approvalQueue);
+    this.#gitCache = new SessionGitCache(approvalQueue, { withhold: id => gatekeeper.isSimulatedCommitId(id) });
   }
 
   override [Symbol.dispose](): void {
@@ -5709,8 +5624,7 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
     // A provisional pull request may carry empty branch shas (advertise() skips them) or a
     // simulated head -- a queued push's commit, withheld from advertising because it is not on
     // GitHub yet and the hint would outlive a rejection.
-    await this.#gitCache.advertise(
-      commitIdsOfPullSummary(details).filter(id => !this.gatekeeper.isSimulatedCommitId(id)));
+    await this.#gitCache.advertise(commitIdsOfPullSummary(details));
     return details;
   }
 
@@ -5723,8 +5637,7 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
       this.logicalId, options?.resultsPerPage ?? 20, await this.#gitCache.stub());
     // A simulated head revision (a queued push's commit) is withheld from advertising.
     await this.#gitCache.advertise(
-      [diff.revision.baseSha, diff.revision.headSha, diff.revision.mergeBaseSha ?? ""]
-        .filter(id => !this.gatekeeper.isSimulatedCommitId(id)));
+      [diff.revision.baseSha, diff.revision.headSha, diff.revision.mergeBaseSha ?? ""]);
     return diff;
   }
 
@@ -5735,8 +5648,8 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
     });
     const mergeBase = await this.gatekeeper.pullMergeBase(
       this.logicalId, await this.#gitCache.stub());
-    // A merge base is always a commit GitHub itself knows (see pullMergeBase), so it advertises
-    // unconditionally.
+    // A merge base is always a commit GitHub itself knows (see pullMergeBase), so it is never
+    // withheld.
     await this.#gitCache.advertise([mergeBase]);
     return mergeBase;
   }
@@ -5750,9 +5663,7 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
       this.logicalId, options?.resultsPerPage ?? 50, await this.#gitCache.stub());
     // Pending (queued-push) commits in a simulated listing are withheld from advertising; their
     // GitHub-known parents still advertise. Checked live per page.
-    const gatekeeper = this.gatekeeper;
-    return await this.#gitCache.wrap(cursor, item =>
-      commitIdsOfSummary(item).filter(id => !gatekeeper.isSimulatedCommitId(id)));
+    return await this.#gitCache.wrap(cursor, commitIdsOfSummary);
   }
 
   async readDiffThreads(options?: GitHubPageOptions): Promise<Cursor<GitHubDiffThread>> {
