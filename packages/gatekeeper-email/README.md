@@ -1,12 +1,12 @@
 # Gatekeeper Email
 
-This package provides an email receiving gatekeeper for Gadgets. It allows a Gadget to receive inbound emails at an address like `<name>@<host>` via a hook.
+This package provides an email gatekeeper for Gadgets. It allows a Gadget to receive inbound emails at an address like `<name>@<host>` via a hook, and to send email from that address with the user's approval.
 
-Unlike most gatekeepers which connect to external services, this gatekeeper *is* the service -- it implements a Cloudflare Email Worker that receives mail directly.
+Unlike most gatekeepers which connect to external services, this gatekeeper *is* the service -- it implements a Cloudflare Email Worker that receives mail directly, and sends through the Worker's `send_email` binding.
 
 ## How It Works
 
-The email gatekeeper uses the URL scheme `http://localhost:8787/gatekeeper/email/mailbox/<name>` to represent the email address `<name>@<host>`, where `<host>` is the domain configured to route email to this worker.
+The email gatekeeper uses the URL scheme `http://localhost:8787/gatekeeper/email/mailbox/<name>` to represent the email address `<name>@<host>`, where `<host>` is the `EMAIL_DOMAIN` var (the domain configured to route email to this worker), or `BASE_URL`'s hostname when that is unset.
 
 When a Gadget is connected to an email address:
 
@@ -15,7 +15,26 @@ When a Gadget is connected to an email address:
 3. The gatekeeper stores the hook reference in a Durable Object keyed by the email username.
 4. When an email arrives, the Email Worker routes it to the appropriate DO, which invokes the Gadget's hook with the parsed email content.
 
-Emails are parsed using [postal-mime](https://www.npmjs.com/package/postal-mime), so the hook receives structured data (from, to, subject, text body, HTML body, attachments) rather than raw MIME.
+Emails are parsed using [postal-mime](https://www.npmjs.com/package/postal-mime), so the hook receives structured data (from, to, subject, text body, HTML body, attachments, Message-ID, References) rather than raw MIME.
+
+## Sending
+
+`EmailSession.send()` sends a message from the bound address:
+
+```typescript
+await env.EMAIL.send({
+  to: ["alice@example.com"],
+  subject: "Re: " + incoming.subject,
+  text: "Thanks, got it.",
+  inReplyTo: incoming.messageId ?? undefined,  // threads the reply
+});
+```
+
+Every send is submitted to the approval queue as a "Send email" action showing the full message (sender, recipients, headers, bodies, and attachment names, sizes, and SHA-256). The approver may approve that one message, or approve always, which auto-approves future sends from this binding. `send()` resolves once the action is queued; the message leaves only when the action is applied. Sent mail cannot be recalled, so the action has no revert.
+
+The sender is always the bound mailbox; the Gadget may only set a display name (`fromName`) and a `replyTo`. Recipients must be plain addresses (`name@example.com`), at most 50 per message, and attachments may total at most 1 MiB.
+
+Delivery is up to the `SEND_EMAIL` (`send_email`) binding: with Email Routing alone, Cloudflare only delivers to the zone's verified destination addresses; arbitrary recipients need the domain onboarded for Cloudflare Email Service sending. When the binding rejects a message, the approved action fails with Cloudflare's error.
 
 ## Creating a Binding
 
@@ -30,11 +49,13 @@ Emails are parsed using [postal-mime](https://www.npmjs.com/package/postal-mime)
 
 Mailbox names are canonicalized to lowercase. They may contain letters, numbers, dots, underscores, plus signs, or hyphens, and cannot start or end with a dot or contain consecutive dots.
 
-The binding provides an `EmailSession` interface with a single method:
+The binding provides an `EmailSession` interface:
 
 ```typescript
 interface EmailSession {
   getAddress(): Promise<string>;  // e.g. "myinbox@example.com"
+  subscribe(callback): Promise<void>;  // receive mail via an EmailHook
+  send(email: OutgoingEmail): Promise<void>;  // see "Sending" above
 }
 ```
 

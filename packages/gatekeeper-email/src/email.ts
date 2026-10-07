@@ -19,10 +19,13 @@ import {
   type ConnectHandoff,
 } from '@gadgets/workshop-shared/gatekeeper';
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
+import { ActionJournal, type BoundActionSet, type TaggedAction } from "@gadgets/gatekeeper-kit/actions";
+import { emailActions, prepareSend, type SendEmailPayload } from "./send";
 import {
   EmailSession,
   EmailHook,
   IncomingEmail,
+  OutgoingEmail,
   EmailAddress as EmailAddressType,
   EmailAttachment,
 } from "./types";
@@ -64,6 +67,11 @@ type Env = Cloudflare.Env & {
   // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
   // NOT include a trailing slash. Omit for localhost dev server.
   BASE_URL?: string,
+  // Domain the mailbox addresses live on (where Email Routing delivers to this worker), e.g.
+  // "example.com". Omit to use BASE_URL's hostname.
+  EMAIL_DOMAIN?: string,
+  // Outbound mail. Without it, approved sends fail with an explanatory error.
+  SEND_EMAIL?: SendEmail,
 }
 
 function getBaseUrl(env: Env) {
@@ -90,12 +98,9 @@ function getSupportedResourcesList(env: Env): SupportedResource[] {
 const EMAIL_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(EMAIL_LOGO_SVG)}`;
 
 function getEmailHost(env: Env) {
-  // TODO: This is actually a lie, as email routing can be configured on an entirely different
-  //   domain and forwarded to this worker. We only really care about the name before the `@` for
-  //   routing purposes. At present the returned host isn't really used anywhere important so
-  //   maybe we can get rid of this entirely, or maybe we should bring back the env var that
-  //   specifies the default host.
-  return new URL(getBaseUrl(env)).hostname;
+  // Email Routing can deliver a domain other than the one this worker is served on, so a
+  // deployment names it in EMAIL_DOMAIN. Sending uses it as the From domain.
+  return env.EMAIL_DOMAIN?.trim() || new URL(getBaseUrl(env)).hostname;
 }
 
 function validateEmailName(value: string | undefined): { ok: true, emailName: string } | { ok: false, message: string } {
@@ -226,6 +231,8 @@ export default {
       text: parsed.text || null,
       html: parsed.html || null,
       attachments,
+      messageId: parsed.messageId || null,
+      references: parsed.references || null,
     };
 
     try {
@@ -483,15 +490,18 @@ class EmailSessionImpl extends RpcTarget implements EmailSession {
   #emailHost: string;
   #ctx: DurableObjectState<EmailGatekeeperImplProps>;
   #approvalQueue: RpcStub<ApprovalQueue>;
+  #actions: BoundActionSet<{ send: SendEmailPayload }>;
 
   constructor(emailName: string, emailHost: string,
       ctx: DurableObjectState<EmailGatekeeperImplProps>,
-      approvalQueue: RpcStub<ApprovalQueue>) {
+      approvalQueue: RpcStub<ApprovalQueue>,
+      actions: BoundActionSet<{ send: SendEmailPayload }>) {
     super();
     this.#emailName = emailName;
     this.#emailHost = emailHost;
     this.#ctx = ctx;
     this.#approvalQueue = approvalQueue;
+    this.#actions = actions;
   }
 
   [Symbol.dispose]() {
@@ -513,6 +523,11 @@ class EmailSessionImpl extends RpcTarget implements EmailSession {
       title: `Receive email`,
       description: `Receive emails sent to ${this.#emailName}@${this.#emailHost}`,
     });
+  }
+
+  async send(email: OutgoingEmail): Promise<void> {
+    let payload = await prepareSend(email, `${this.#emailName}@${this.#emailHost}`);
+    await this.#actions.submit(this.#approvalQueue, "send", payload);
   }
 }
 
@@ -537,7 +552,7 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
     return {
       url: `${getBaseUrl(this.env)}/mailbox/${encodeURIComponent(emailName)}`,
       title: `${emailName}@${host}`,
-      snippet: `Receive emails sent to ${emailName}@${host}`,
+      snippet: `Send and receive emails as ${emailName}@${host}`,
       suggestedBindingName: "EMAIL",
       tsType: "EmailSession",
       hookTsType: "EmailHook",
@@ -548,29 +563,39 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
     return TYPES_CODE;
   }
 
+  #boundActions?: BoundActionSet<{ send: SendEmailPayload }>;
+
+  #actions(): BoundActionSet<{ send: SendEmailPayload }> {
+    this.#boundActions ??= emailActions.bind(
+        new ActionJournal<TaggedAction<{ send: SendEmailPayload }>>(
+            this.ctx.storage.kv, { namespace: "email" }),
+        { sender: this.env.SEND_EMAIL });
+    return this.#boundActions;
+  }
+
   async getAutoApprovableActions() {
-    return [];
+    return this.#actions().autoApprovableKinds();
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<EmailSession> {
     let emailName = this.ctx.props.emailName;
     let host = getEmailHost(this.env);
-    return new EmailSessionImpl(emailName, host, this.ctx, approvalQueue.dup());
+    return new EmailSessionImpl(emailName, host, this.ctx, approvalQueue.dup(), this.#actions());
   }
 
   // ---------------------------------------------------------------------------
 
   async applyAction(action: number): Promise<void> {
-    throw new Error("Email gatekeeper has no actions");
+    await this.#actions().apply(action);
   }
 
   async rejectAction(action: number): Promise<void> {
-    // No actions to reject.
+    await this.#actions().reject(action);
   }
 
   revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
-    throw new Error("Email gatekeeper has no actions to revert");
+    throw new Error("Sent email cannot be recalled");
   }
 
   /**
