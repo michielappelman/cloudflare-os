@@ -10,8 +10,9 @@
 // * Device — a single physical device (a group of entities provided by the same integration).
 // * Entity — a single entity (sensor, light, switch, etc).
 //
-// Dashboards, template rendering, history queries, event firing and global discovery are only
-// exposed on the whole-instance session.
+// Dashboards, automations/scripts/scenes, organisation (categories, labels, areas, floors),
+// template rendering, history queries, event firing and global discovery are only exposed on the
+// whole-instance session.
 //
 // =====================================================================================
 // API CONVENTIONS
@@ -156,6 +157,9 @@ export interface EntitySummary {
   areaId?: string;
   /** Labels currently applied to this entity. */
   labels: string[];
+  /** Organisational category per category scope, e.g. `{ automation: "01JABC..." }`. Scopes are
+   * "automation", "script", "scene" and "helpers". Not to be confused with `entityCategory`. */
+  categories: Record<string, string>;
   /** Entity category in HA's registry: undefined for primary controls, "config" for settings,
    * "diagnostic" for diagnostic readings. */
   entityCategory?: "config" | "diagnostic";
@@ -248,6 +252,8 @@ export interface EntityFilter {
   areaId?: string;
   /** Restrict to entities carrying this label. */
   labelId?: string;
+  /** Restrict to entities in this organisational category (in any scope). */
+  categoryId?: string;
   /** Restrict to entities belonging to this device. */
   deviceId?: string;
   /** Free-text search applied to entity ID and display name. */
@@ -406,6 +412,125 @@ export interface HomeAssistantSession extends RpcTarget {
   /** List custom Lovelace resources (custom cards, themes, modules).
    * @example const resources = await session.listLovelaceResources(); */
   listLovelaceResources(): Promise<LovelaceResourceInfo[]>;
+
+  // ---- Automations, scripts, scenes ---------------------------------------
+  //
+  // Only items stored by Home Assistant's UI editors (automations.yaml, scripts.yaml,
+  // scenes.yaml) can be edited. Items defined elsewhere in YAML are listed and readable but
+  // `saveConfig()` / `delete()` throw for them. Saving needs an admin access token.
+
+  /** List every automation, including ones created by pending (unapproved) actions.
+   * @example const automations = await session.listAutomations(); */
+  listAutomations(): Promise<ConfigItemInfo[]>;
+  /** List every script.
+   * @example const scripts = await session.listScripts(); */
+  listScripts(): Promise<ConfigItemInfo[]>;
+  /** List every scene.
+   * @example const scenes = await session.listScenes(); */
+  listScenes(): Promise<ConfigItemInfo[]>;
+
+  /** Open an automation by its id (`ConfigItemInfo.id`) or entity id.
+   * @example const automation = await session.getAutomation("automation.porch_light_at_sunset");
+   *          const config = await automation.getConfig(); */
+  getAutomation(idOrEntityId: string): Promise<Automation>;
+  /** Open a script by its key (`ConfigItemInfo.id`, the object id of `script.<key>`) or entity id.
+   * @example const script = await session.getScript("script.goodnight"); */
+  getScript(keyOrEntityId: string): Promise<Script>;
+  /** Open a scene by its id or entity id.
+   * @example const scene = await session.getScene("scene.movie_night"); */
+  getScene(idOrEntityId: string): Promise<Scene>;
+
+  /** Queue the creation of a new automation. Returns its id, usable right away with
+   * `getAutomation()` (reads show the pending config). The config is checked by Home Assistant
+   * before it is queued; invalid triggers, conditions or actions throw.
+   * @example
+   * const id = await session.createAutomation({
+   *   alias: "Porch light at sunset",
+   *   triggers: [{ trigger: "sun", event: "sunset" }],
+   *   actions: [{ action: "light.turn_on", target: { entity_id: "light.porch" } }],
+   * });
+   * await (await session.getAutomation(id)).setCategory(lightingCategoryId); */
+  createAutomation(config: AutomationConfig): Promise<string>;
+  /** Queue the creation of a new script. `key` becomes the entity id `script.<key>`; when omitted
+   * it is derived from `config.alias`. Returns the key.
+   * @example
+   * const key = await session.createScript({
+   *   alias: "Goodnight",
+   *   sequence: [{ action: "light.turn_off", target: { area_id: "living_room" } }],
+   * }); */
+  createScript(config: ScriptConfig, key?: string): Promise<string>;
+  /** Queue the creation of a new scene. Returns its id.
+   * @example
+   * const id = await session.createScene({
+   *   name: "Movie night",
+   *   entities: { "light.living_room": { state: "on", brightness: 40 }, "media_player.tv": "on" },
+   * }); */
+  createScene(config: SceneConfig): Promise<string>;
+
+  // ---- Organisation: categories, labels, areas, floors ---------------------
+  //
+  // `create*` methods return the new item's id. Until the creation is approved that id is
+  // provisional (`"~<n>"`); it can already be passed to later calls in this session
+  // (`assignEntities`, `setCategory`, `update*`, ...), which resolve it once the creation has been
+  // applied. Approve the creation before the actions that use it.
+
+  /** List the categories of one scope: "automation", "script", "scene" or "helpers".
+   * @example const categories = await session.listCategories("automation"); */
+  listCategories(scope: string): Promise<CategoryInfo[]>;
+  /** Queue the creation of a category in a scope. Returns its (provisional) id.
+   * @example const lighting = await session.createCategory("automation", "Lighting", "mdi:lightbulb"); */
+  createCategory(scope: string, name: string, icon?: string): Promise<string>;
+  /** Queue a change to a category's name or icon.
+   * @example await session.updateCategory("automation", categoryId, { name: "Lights" }); */
+  updateCategory(scope: string, categoryId: string, changes: CategoryChanges): Promise<void>;
+  /** Queue the deletion of a category. Its items become uncategorised.
+   * @example await session.deleteCategory("automation", categoryId); */
+  deleteCategory(scope: string, categoryId: string): Promise<void>;
+
+  /** Queue the creation of a label. Returns its (provisional) id.
+   * @example const nightlights = await session.createLabel("Nightlights", { color: "indigo" }); */
+  createLabel(name: string, options?: LabelChanges): Promise<string>;
+  /** Queue a change to a label.
+   * @example await session.updateLabel("nightlights", { icon: "mdi:weather-night" }); */
+  updateLabel(labelId: string, changes: LabelChanges): Promise<void>;
+  /** Queue the deletion of a label. It is removed from every entity, device and area.
+   * @example await session.deleteLabel("nightlights"); */
+  deleteLabel(labelId: string): Promise<void>;
+
+  /** Queue the creation of an area. Returns its (provisional) id.
+   * @example const office = await session.createArea("Office", { floorId: "first_floor" }); */
+  createArea(name: string, options?: AreaChanges): Promise<string>;
+  /** Queue a change to an area.
+   * @example await session.updateArea("office", { floorId: "ground_floor" }); */
+  updateArea(areaId: string, changes: AreaChanges): Promise<void>;
+  /** Queue the deletion of an area. Its devices and entities become unassigned.
+   * @example await session.deleteArea("office"); */
+  deleteArea(areaId: string): Promise<void>;
+
+  /** Queue the creation of a floor. Returns its (provisional) id.
+   * @example const attic = await session.createFloor("Attic", { level: 2 }); */
+  createFloor(name: string, options?: FloorChanges): Promise<string>;
+  /** Queue a change to a floor.
+   * @example await session.updateFloor("attic", { icon: "mdi:home-roof" }); */
+  updateFloor(floorId: string, changes: FloorChanges): Promise<void>;
+  /** Queue the deletion of a floor. Its areas become unassigned.
+   * @example await session.deleteFloor("attic"); */
+  deleteFloor(floorId: string): Promise<void>;
+
+  /** Queue one change to how several entities are organised: category per scope, labels, area.
+   * Works for any entity in Home Assistant's entity registry, including automations, scripts,
+   * scenes and helpers. One call is one approval.
+   * @example
+   * await session.assignEntities(
+   *   ["automation.porch_light_at_sunset", "automation.hall_light_on_motion"],
+   *   { categories: { automation: lightingCategoryId }, addLabels: ["outdoor"] },
+   * );
+   * @example
+   * await session.assignEntities(["input_boolean.guest_mode"], { categories: { helpers: modesId } }); */
+  assignEntities(entityIds: string[], changes: EntityGroupingChanges): Promise<void>;
+  /** Queue one change to how several devices are organised: labels and area.
+   * @example await session.assignDevices([deviceId], { areaId: "office", addLabels: ["work"] }); */
+  assignDevices(deviceIds: string[], changes: DeviceGroupingChanges): Promise<void>;
 }
 
 /** Static configuration of the HA instance. */
@@ -757,4 +882,185 @@ export interface Dashboard extends RpcTarget {
    * config.views.push({ title: "New tab", cards: [] });
    * await dashboard.saveConfig(config); */
   saveConfig(config: DashboardConfig): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Automations, scripts and scenes
+
+/** The kinds of configuration item the gatekeeper can author. */
+export type ConfigItemDomain = "automation" | "script" | "scene";
+
+/** Summary of one automation, script or scene. */
+export interface ConfigItemInfo {
+  domain: ConfigItemDomain;
+  /** Storage id: the automation/scene `id`, or the script key. Absent for items defined in YAML
+   * without an id, which can't be opened. */
+  id?: string;
+  /** Entity id. Absent while a creation is pending approval. */
+  entityId?: string;
+  name: string;
+  description?: string;
+  /** Entity state: "on"/"off" for automations and scripts, a timestamp for scenes. */
+  state?: string;
+  /** ISO 8601 time the automation or script last ran. */
+  lastTriggered?: string;
+  /** Category in this domain's scope ("automation", "script" or "scene"). */
+  categoryId?: string;
+  labels: string[];
+  areaId?: string;
+  /** Set when a queued, unapproved action creates or edits this item. */
+  pendingChange?: "create" | "edit";
+}
+
+/** `ConfigItemInfo` plus whether the item can be edited through the API. */
+export interface ConfigItemDetails extends ConfigItemInfo {
+  /** True for items stored by Home Assistant's UI editors; false for items defined in YAML. */
+  editable: boolean;
+}
+
+/** An automation's configuration, in Home Assistant's own (snake_case) format. Fields not listed
+ * here are passed through verbatim. */
+export interface AutomationConfig {
+  alias?: string;
+  description?: string;
+  mode?: "single" | "restart" | "queued" | "parallel";
+  max?: number;
+  triggers?: unknown[];
+  conditions?: unknown[];
+  actions?: unknown[];
+  variables?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** A script's configuration, in Home Assistant's own format. */
+export interface ScriptConfig {
+  alias?: string;
+  description?: string;
+  icon?: string;
+  mode?: "single" | "restart" | "queued" | "parallel";
+  fields?: Record<string, unknown>;
+  sequence?: unknown[];
+  [key: string]: unknown;
+}
+
+/** A scene's configuration: entity id → state (a string, or an object with `state` plus
+ * attributes). */
+export interface SceneConfig {
+  name: string;
+  icon?: string;
+  entities: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** An automation. Organisation changes (`setCategory`, `setLabels`, `setArea`) also work while
+ * the automation's creation is still pending; they apply once it exists. */
+export interface Automation extends RpcTarget {
+  /** Summary plus whether the automation is editable. */
+  describe(): Promise<ConfigItemDetails>;
+  /** The automation's configuration, including pending edits.
+   * @example const config = await automation.getConfig(); */
+  getConfig(): Promise<AutomationConfig>;
+  /** Queue a full replacement of the configuration (no merge). Read with `getConfig()`, change
+   * it, write it back.
+   * @example
+   * const config = await automation.getConfig();
+   * config.actions = [...(config.actions ?? []), { action: "notify.notify", data: { message: "Done" } }];
+   * await automation.saveConfig(config); */
+  saveConfig(config: AutomationConfig): Promise<void>;
+  /** Queue the deletion of this automation. */
+  delete(): Promise<void>;
+  /** Queue moving the automation into a category of scope "automation" (null: uncategorised). */
+  setCategory(categoryId: string | null): Promise<void>;
+  /** Queue replacing the automation's labels. */
+  setLabels(labelIds: string[]): Promise<void>;
+  /** Queue assigning the automation to an area (null: none). */
+  setArea(areaId: string | null): Promise<void>;
+}
+
+/** A script. Same contract as `Automation`. */
+export interface Script extends RpcTarget {
+  describe(): Promise<ConfigItemDetails>;
+  getConfig(): Promise<ScriptConfig>;
+  saveConfig(config: ScriptConfig): Promise<void>;
+  delete(): Promise<void>;
+  setCategory(categoryId: string | null): Promise<void>;
+  setLabels(labelIds: string[]): Promise<void>;
+  setArea(areaId: string | null): Promise<void>;
+}
+
+/** A scene. Same contract as `Automation`. */
+export interface Scene extends RpcTarget {
+  describe(): Promise<ConfigItemDetails>;
+  getConfig(): Promise<SceneConfig>;
+  saveConfig(config: SceneConfig): Promise<void>;
+  delete(): Promise<void>;
+  setCategory(categoryId: string | null): Promise<void>;
+  setLabels(labelIds: string[]): Promise<void>;
+  setArea(areaId: string | null): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Organisation
+
+/** An organisational category. Categories are per scope: "automation", "script", "scene",
+ * "helpers". An entity is in at most one category per scope. */
+export interface CategoryInfo {
+  id: string;
+  scope: string;
+  name: string;
+  icon?: string;
+}
+
+export interface CategoryChanges {
+  name?: string;
+  /** Icon such as "mdi:lightbulb"; null removes it. */
+  icon?: string | null;
+}
+
+export interface LabelChanges {
+  /** New name. Ignored by `createLabel`, which takes the name as its first argument. */
+  name?: string;
+  /** A theme colour name ("red", "indigo", ...) or "#rrggbb"; null removes it. */
+  color?: string | null;
+  icon?: string | null;
+  description?: string | null;
+}
+
+export interface AreaChanges {
+  name?: string;
+  /** Floor the area is on; null removes it. */
+  floorId?: string | null;
+  icon?: string | null;
+  aliases?: string[];
+  /** Labels applied to the area itself (replaces the current set). */
+  labels?: string[];
+}
+
+export interface FloorChanges {
+  name?: string;
+  /** Level number (0 = ground floor); null removes it. */
+  level?: number | null;
+  icon?: string | null;
+  aliases?: string[];
+}
+
+/** Organisation changes for entities. Omitted fields stay as they are. */
+export interface EntityGroupingChanges {
+  /** Category per scope; null removes the entity from that scope's category.
+   * e.g. `{ automation: "01JABC..." }` or `{ helpers: null }`. */
+  categories?: Record<string, string | null>;
+  /** Replace all labels. Can't be combined with `addLabels`/`removeLabels`. */
+  labels?: string[];
+  addLabels?: string[];
+  removeLabels?: string[];
+  /** Area override for the entity (null: follow its device's area, or none). */
+  areaId?: string | null;
+}
+
+/** Organisation changes for devices. Omitted fields stay as they are. */
+export interface DeviceGroupingChanges {
+  labels?: string[];
+  addLabels?: string[];
+  removeLabels?: string[];
+  areaId?: string | null;
 }

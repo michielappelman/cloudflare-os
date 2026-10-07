@@ -55,27 +55,67 @@ import {
   overlayEntityStates,
   type HAStateRecord,
 } from "./simulation";
+import {
+  CONFIG_ITEM_PLATFORM,
+  changedTopLevelFields,
+  configItemName,
+  isAuthoringAction,
+  isProvisional,
+  isSlug,
+  overlayConfigItemConfig,
+  overlayGroups,
+  overlayRegistry,
+  pendingConfigItems,
+  provisionalId,
+  referencedGroupIds,
+  slugify,
+  withoutId,
+  type AssignmentChanges,
+  type AuthoringAction,
+  type AuthoringActionBody,
+  type AuthoringRevertInfo,
+  type ConfigItemDomain,
+  type EntityRegistryEntry,
+  type GroupKind,
+  type GroupRegistryEntry,
+} from "./authoring";
+import { applyAuthoringAction, revertAuthoringAction, type ProvisionalIds } from "./authoring-apply";
 import type {
   Area,
+  AreaChanges,
   AreaInfo,
+  Automation,
+  AutomationConfig,
+  CategoryChanges,
+  CategoryInfo,
+  ConfigItemDetails,
+  ConfigItemInfo,
   Dashboard,
   DashboardConfig,
   DashboardInfo,
   Device,
+  DeviceGroupingChanges,
   DeviceInfo,
   Entity,
   EntityFilter,
+  EntityGroupingChanges,
   EntityHistory,
   EntityState,
   EntitySummary,
+  FloorChanges,
   FloorInfo,
   HomeAssistantConfig,
   HomeAssistantSession,
   Label,
+  LabelChanges,
   LabelInfo,
   LightTurnOnData,
   LogbookEntry,
   LovelaceResourceInfo,
+  Scene,
+  SceneConfig,
+  Script,
+  ScriptConfig,
   ServiceCallTarget,
   ServiceInfo,
 } from "./types";
@@ -142,7 +182,9 @@ const HOMEASSISTANT_ICON: AvatarImage = { url: HOMEASSISTANT_LOGO_URL };
 const INSTANCE_RESOURCE: SupportedResource = {
   urlPattern: "https://*",
   title: "Home Assistant",
-  description: "Access to a Home Assistant instance: every area, device, entity, and dashboard.",
+  description:
+    "Access to a Home Assistant instance: every area, device, entity, dashboard, automation, " +
+    "script and scene, and how they are organised.",
   icon: HOMEASSISTANT_ICON,
 };
 
@@ -1033,7 +1075,8 @@ export type HomeAssistantAction =
       urlPath: string | null;
       config: unknown;
       origin: ActionOrigin;
-    };
+    }
+  | AuthoringAction;
 
 /** Captured at apply time so we can later restore the prior state via revertAction(). */
 export type HomeAssistantRevertInfo =
@@ -1051,6 +1094,7 @@ export type HomeAssistantRevertInfo =
       urlPath: string | null;
       previousConfig: unknown;
     }
+  | AuthoringRevertInfo
   | { type: "noRevert" };
 
 // Internal storage row for pending (submitted but not yet applied) actions.
@@ -1193,14 +1237,19 @@ export class HomeAssistantGatekeeperImpl
 
     let revertInfo: HomeAssistantRevertInfo;
     try {
-      revertInfo = await this.#snapshotForRevert(action, creds);
-    } catch {
-      // If we can't snapshot, proceed without revert.
-      revertInfo = { type: "noRevert" };
-    }
-
-    try {
-      await executeAction(action, creds);
+      if (isAuthoringAction(action)) {
+        // Authoring actions capture their revert information as part of applying, since some
+        // (creations) only know what to undo once Home Assistant has assigned an id.
+        revertInfo = await applyAuthoringAction(action, creds, this.#provisionalIds());
+      } else {
+        try {
+          revertInfo = await this.#snapshotForRevert(action, creds);
+        } catch {
+          // If we can't snapshot, proceed without revert.
+          revertInfo = { type: "noRevert" };
+        }
+        await executeAction(action, creds);
+      }
     } catch (e) {
       if (e instanceof HomeAssistantError && e.isAuthError) {
         await this.#userAccount().noteCredentialsExpired();
@@ -1268,6 +1317,10 @@ export class HomeAssistantGatekeeperImpl
         });
         return;
       }
+      case "configItemSnapshot":
+      case "groupSnapshot":
+      case "assignSnapshot":
+        return await revertAuthoringAction(revertInfo, creds);
     }
   }
 
@@ -1299,6 +1352,8 @@ export class HomeAssistantGatekeeperImpl
   ): SessionContext {
     const self = this;
     let disposed = false;
+    // Whether the token's user is an HA admin; fetched once per session, on first need.
+    let isAdmin: Promise<boolean> | undefined;
     const ctx: SessionContext = {
       creds,
       approvalQueue,
@@ -1323,13 +1378,23 @@ export class HomeAssistantGatekeeperImpl
 
         const id = self.#nextActionId();
         const action = { ...body, id } as HomeAssistantAction;
+        if (isAuthoringAction(action)) {
+          for (const ref of referencedGroupIds(action)) {
+            if (isProvisional(ref) && !self.#knowsProvisional(ref)) {
+              throw new Error(
+                `Unknown id "${ref}": ids starting with "~" are returned by create* calls in this ` +
+                  `session, and this one wasn't (or its creation was rejected).`,
+              );
+            }
+          }
+        }
         const row: PendingActionRow = { id, action, submittedAt: Date.now() };
         self.ctx.storage.kv.put<PendingActionRow>(`pending:${id}`, row);
 
         let description;
         try {
           const registry = await fetchRegistrySnapshot(creds);
-          description = describeAction(action, registry);
+          description = describeAction(action, registry, self.#listPendingActions());
         } catch {
           // If registry fetch fails, fall back to a minimal description.
           const emptyRegistry: RegistrySnapshot = {
@@ -1340,7 +1405,7 @@ export class HomeAssistantGatekeeperImpl
             entities: [],
             states: new Map(),
           };
-          description = describeAction(action, emptyRegistry);
+          description = describeAction(action, emptyRegistry, self.#listPendingActions());
         }
 
         try {
@@ -1350,6 +1415,21 @@ export class HomeAssistantGatekeeperImpl
           self.#deletePending(id);
           throw e;
         }
+        return id;
+      },
+      async assertAdmin() {
+        isAdmin ??= withWebSocket(creds, (ws) => ws.send<{ is_admin?: boolean }>({ type: "auth/current_user" }))
+          .then((user) => user.is_admin === true)
+          .catch((e) => {
+            isAdmin = undefined;
+            throw e;
+          });
+        if (!(await isAdmin)) {
+          throw new Error(
+            "Editing automations, scripts, scenes and their organisation needs a Home Assistant " +
+              "administrator. The access token connected here belongs to a non-admin user.",
+          );
+        }
       },
       async registrySnapshot() {
         return await fetchRegistrySnapshot(creds);
@@ -1358,14 +1438,17 @@ export class HomeAssistantGatekeeperImpl
         return self.#listPendingActions();
       },
       async registrySnapshotWithOverlay() {
-        const snapshot = await fetchRegistrySnapshot(creds);
         const pending = self.#listPendingActions();
+        const { snapshot, appliedCount: registryApplied } = overlayRegistry(
+          await fetchRegistrySnapshot(creds),
+          pending,
+        );
         if (pending.length === 0) {
           return { snapshot, appliedCount: 0 };
         }
         const index = indexPendingByEntity(pending, snapshot);
         if (index.size === 0) {
-          return { snapshot, appliedCount: 0 };
+          return { snapshot, appliedCount: registryApplied };
         }
         // Build a new states map with overlays applied.
         const newStates = new Map<string, any>(snapshot.states);
@@ -1390,7 +1473,7 @@ export class HomeAssistantGatekeeperImpl
         }
         return {
           snapshot: { ...snapshot, states: newStates },
-          appliedCount: totalApplied,
+          appliedCount: registryApplied + totalApplied,
         };
       },
       fork() {
@@ -1416,6 +1499,34 @@ export class HomeAssistantGatekeeperImpl
   //   counter:nextActionId  → number
   //   pending:<id>          → PendingActionRow  (submitted, awaiting approval)
   //   applied:<id>          → AppliedActionRow  (approved + applied; retains revert info)
+  //   prov:~<id>            → string            (real id of the group action <id> created)
+
+  #provisionalIds(): ProvisionalIds {
+    const kv = this.ctx.storage.kv;
+    return {
+      resolve(id) {
+        const real = kv.get<string>(`prov:${id}`);
+        if (real === undefined) {
+          throw new Error(
+            `This action uses "${id}", which action #${id.slice(1)} creates. That action has not ` +
+              `been applied yet: approve it first, then retry this one.`,
+          );
+        }
+        return real;
+      },
+      record(provisional, realId) {
+        kv.put(`prov:${provisional}`, realId);
+      },
+    };
+  }
+
+  /** Whether a provisional id names a group created by an action of this gatekeeper that is
+   * pending or applied. */
+  #knowsProvisional(id: string): boolean {
+    if (this.ctx.storage.kv.get<string>(`prov:${id}`) !== undefined) return true;
+    const pending = this.#getPending(Number(id.slice(1)))?.action;
+    return pending?.type === "saveGroup" && !pending.groupId;
+  }
 
   #nextActionId(): number {
     const v = (this.ctx.storage.kv.get<number>("counter:nextActionId") ?? 0) + 1;
@@ -1531,8 +1642,14 @@ interface SessionContext {
   fork(): SessionContext;
 
   /** Submit a side-effecting action to the approval queue. Stores a pending row in DO storage
-   * and awaits the approval queue. The action body is enriched with a fresh `id`. */
-  submitWrite(body: SubmitWriteBody): Promise<void>;
+   * and awaits the approval queue. The action body is enriched with a fresh `id`, which is
+   * returned. */
+  submitWrite(body: SubmitWriteBody): Promise<number>;
+
+  /** Throw unless the connected token belongs to a Home Assistant administrator, which the
+   * config editor endpoints and registry writes require. Checked before reading or queueing
+   * them: a non-admin gets HTTP 401 there, which would otherwise read as a revoked token. */
+  assertAdmin(): Promise<void>;
 
   /** Fetch a fresh registry snapshot (no caching yet). Used both to enrich action descriptions
    * and to power simulation overlays. */
@@ -1543,10 +1660,10 @@ interface SessionContext {
    * top of real HA state. Synchronous: pending rows live in DO storage's KV. */
   listPendingActions(): HomeAssistantAction[];
 
-  /** Fetch a registry snapshot AND apply pending-action overlays to its `states` map. Returns
-   * the per-entity count of pending changes applied (the sum across all entities). Used by
-   * read methods that derive from the states map (listEntities, describe, etc.) so simulation
-   * is consistent regardless of which path the read takes. */
+  /** Fetch a registry snapshot AND apply pending-action overlays: organisation changes to the
+   * registries, and simulated states to its `states` map. Returns the number of pending changes
+   * applied. Used by read methods that derive from the snapshot (listEntities, describe, etc.)
+   * so simulation is consistent regardless of which path the read takes. */
   registrySnapshotWithOverlay(): Promise<{ snapshot: RegistrySnapshot; appliedCount: number }>;
 }
 
@@ -1555,7 +1672,8 @@ interface SessionContext {
 type SubmitWriteBody =
   | Omit<HomeAssistantAction & { type: "callService" }, "id">
   | Omit<HomeAssistantAction & { type: "fireEvent" }, "id">
-  | Omit<HomeAssistantAction & { type: "saveDashboard" }, "id">;
+  | Omit<HomeAssistantAction & { type: "saveDashboard" }, "id">
+  | AuthoringActionBody;
 
 // Defensive runtime validation of action bodies. Catches the common mistake of passing a
 // single options object where positional arguments were expected, and produces an error
@@ -1873,6 +1991,7 @@ function buildSummary(registryEntity: any | undefined, state: any | undefined, d
     deviceId: registryEntity?.device_id ?? undefined,
     areaId,
     labels: registryEntity?.labels ?? [],
+    categories: registryEntity?.categories ?? {},
     entityCategory,
     disabled: registryEntity?.disabled_by != null,
     hidden: registryEntity?.hidden_by != null,
@@ -1978,6 +2097,7 @@ function applyEntityFilter(
     if (domains && !domains.includes(s.domain)) return false;
     if (f.areaId && s.areaId !== f.areaId) return false;
     if (f.labelId && !s.labels.includes(f.labelId)) return false;
+    if (f.categoryId && !Object.values(s.categories).includes(f.categoryId)) return false;
     if (f.deviceId && s.deviceId !== f.deviceId) return false;
     if (search) {
       const hay = `${s.entityId}\n${s.name}`.toLowerCase();
@@ -2010,6 +2130,221 @@ function buildTarget(target?: ServiceCallTarget): HATarget | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// Authoring helpers: automations, scripts, scenes, and organisation
+
+const CATEGORY_SCOPES: Record<string, true> = { automation: true, script: true, scene: true, helpers: true };
+
+function assertCategoryScope(scope: string): void {
+  if (!Object.hasOwn(CATEGORY_SCOPES, scope)) {
+    throw new TypeError(
+      `Unknown category scope ${JSON.stringify(scope)}: use "automation", "script", "scene" or "helpers".`,
+    );
+  }
+}
+
+/** Registry field for each field of the public `*Changes` types, per kind. */
+const GROUP_FIELDS: Record<GroupKind, Record<string, string>> = {
+  category: { name: "name", icon: "icon" },
+  label: { name: "name", color: "color", icon: "icon", description: "description" },
+  area: { name: "name", floorId: "floor_id", icon: "icon", aliases: "aliases", labels: "labels" },
+  floor: { name: "name", level: "level", icon: "icon", aliases: "aliases" },
+};
+
+/** Registry fields (snake_case) from a public `*Changes` object. Creating drops nulls, which
+ * mean "remove" and some create commands reject. */
+function registryFields(kind: GroupKind, changes: object, creating: boolean): Record<string, unknown> {
+  // The public *Changes types are plain records of the keys GROUP_FIELDS lists.
+  const source = changes as Record<string, unknown>;
+  const fields: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(GROUP_FIELDS[kind])) {
+    const value = source[key];
+    if (value === undefined || (creating && value === null)) continue;
+    fields[field] = value;
+  }
+  if (typeof fields.name === "string" && !fields.name.trim()) {
+    throw new TypeError(`The ${kind} name must not be empty.`);
+  }
+  return fields;
+}
+
+/** A registry list with pending creations, changes and deletions applied. */
+async function listGroupsWithPending(
+  ctx: SessionContext,
+  kind: GroupKind,
+  scope?: string,
+): Promise<{ list: GroupRegistryEntry[]; appliedCount: number }> {
+  const list = await callWs(ctx, async (ws) => {
+    try {
+      return await ws.send<GroupRegistryEntry[]>({
+        type: `config/${kind}_registry/list`,
+        ...(kind === "category" ? { scope } : {}),
+      });
+    } catch (e) {
+      // Floors, labels and categories are newer than areas; older instances have none.
+      if (kind === "area") throw e;
+      return [];
+    }
+  });
+  return overlayGroups(kind, list, ctx.listPendingActions(), scope);
+}
+
+/** Names of the given groups, which must exist or be created by pending actions. */
+async function groupNames(
+  ctx: SessionContext,
+  kind: GroupKind,
+  ids: readonly string[],
+  scope?: string,
+): Promise<Record<string, string>> {
+  if (ids.length === 0) return {};
+  const { list } = await listGroupsWithPending(ctx, kind, scope);
+  const names: Record<string, string> = {};
+  for (const id of ids) {
+    const group = list.find((g) => g[`${kind}_id`] === id);
+    if (!group) {
+      throw new Error(`No ${kind} with id "${id}"${scope ? ` in scope "${scope}"` : ""} exists.`);
+    }
+    names[id] = group.name ?? id;
+  }
+  return names;
+}
+
+/** Check that every group `changes` names exists; returns the names of its categories, for the
+ * approval description. */
+async function checkAssignment(
+  ctx: SessionContext,
+  changes: AssignmentChanges,
+): Promise<Record<string, string>> {
+  if (changes.labels && (changes.addLabels || changes.removeLabels)) {
+    throw new TypeError("Pass either `labels` (replacing all labels) or `addLabels`/`removeLabels`, not both.");
+  }
+  if (Object.values(changes).every((v) => v === undefined)) {
+    throw new TypeError("No changes given: pass categories, labels, addLabels, removeLabels or areaId.");
+  }
+  const categoryNames: Record<string, string> = {};
+  for (const [scope, id] of Object.entries(changes.categories ?? {})) {
+    assertCategoryScope(scope);
+    if (id != null) Object.assign(categoryNames, await groupNames(ctx, "category", [id], scope));
+  }
+  await groupNames(ctx, "label", [...(changes.labels ?? []), ...(changes.addLabels ?? [])]);
+  if (changes.areaId) await groupNames(ctx, "area", [changes.areaId]);
+  return categoryNames;
+}
+
+/** An automation, script or scene entity, with its storage id when it has one. */
+interface ConfigItemEntity {
+  entityId: string;
+  id?: string;
+  entry?: EntityRegistryEntry;
+  state?: HAStateRecord;
+}
+
+function configItemEntities(domain: ConfigItemDomain, snapshot: RegistrySnapshot): ConfigItemEntity[] {
+  const items = new Map<string, ConfigItemEntity>();
+  for (const entry of snapshot.entities as EntityRegistryEntry[]) {
+    if (!entry.entity_id.startsWith(`${domain}.`)) continue;
+    items.set(entry.entity_id, {
+      entityId: entry.entity_id,
+      id: entry.platform === CONFIG_ITEM_PLATFORM[domain] ? entry.unique_id : undefined,
+      entry,
+      state: snapshot.states.get(entry.entity_id),
+    });
+  }
+  for (const [entityId, state] of snapshot.states) {
+    if (entityId.startsWith(`${domain}.`) && !items.has(entityId)) items.set(entityId, { entityId, state });
+  }
+  for (const item of items.values()) {
+    // Automations and scenes also expose their id as a state attribute.
+    const attributeId = item.state?.attributes.id;
+    item.id ??= typeof attributeId === "string" ? attributeId : undefined;
+  }
+  return [...items.values()];
+}
+
+function configItemInfo(
+  domain: ConfigItemDomain,
+  item: ConfigItemEntity | undefined,
+  id: string | undefined,
+  config: Record<string, unknown> | undefined,
+  pendingChange: "create" | "edit" | undefined,
+): ConfigItemInfo {
+  const attributes = item?.state?.attributes ?? {};
+  const friendlyName = typeof attributes.friendly_name === "string" ? attributes.friendly_name : undefined;
+  return {
+    domain,
+    id,
+    entityId: item?.entityId,
+    name:
+      (pendingChange ? configItemName(domain, config) : undefined) ??
+      item?.entry?.name ??
+      friendlyName ??
+      configItemName(domain, config) ??
+      id ??
+      item?.entityId ??
+      domain,
+    description: typeof config?.description === "string" ? config.description : undefined,
+    state: item?.state?.state,
+    lastTriggered: typeof attributes.last_triggered === "string" ? attributes.last_triggered : undefined,
+    categoryId: item?.entry?.categories?.[domain],
+    labels: item?.entry?.labels ?? [],
+    areaId: item?.entry?.area_id ?? undefined,
+    pendingChange,
+  };
+}
+
+/** Reject a configuration Home Assistant would refuse before it is queued, so the agent can fix
+ * it right away. Home Assistant validates again when the action is applied. */
+async function checkItemConfig(
+  ctx: SessionContext,
+  domain: ConfigItemDomain,
+  config: Record<string, unknown>,
+): Promise<void> {
+  if (domain === "scene") {
+    if (typeof config.name !== "string" || !config.name.trim()) {
+      throw new TypeError(`A scene needs a non-empty "name".`);
+    }
+    if (!config.entities || typeof config.entities !== "object" || Array.isArray(config.entities)) {
+      throw new TypeError(`A scene needs "entities": an object mapping entity ids to states.`);
+    }
+    return;
+  }
+  // A blueprint-based item has no triggers or actions of its own.
+  if ("use_blueprint" in config) return;
+  const parts =
+    domain === "automation"
+      ? {
+          triggers: config.triggers ?? config.trigger,
+          conditions: config.conditions ?? config.condition,
+          actions: config.actions ?? config.action,
+        }
+      : { actions: config.sequence };
+  if (domain === "automation" && (parts.triggers === undefined || parts.actions === undefined)) {
+    throw new TypeError(`An automation needs "triggers" and "actions".`);
+  }
+  if (domain === "script" && parts.actions === undefined) {
+    throw new TypeError(`A script needs a "sequence" of actions.`);
+  }
+  let result: Record<string, { valid: boolean; error: string | null }>;
+  try {
+    result = await callWs(ctx, (ws) =>
+      ws.send({
+        type: "validate_config",
+        ...Object.fromEntries(Object.entries(parts).filter(([, v]) => v !== undefined)),
+      }),
+    );
+  } catch (e) {
+    if (e instanceof HomeAssistantError && e.isAuthError) throw e;
+    // Instances older than 2024.10 don't accept these keys; they validate on apply instead.
+    return;
+  }
+  const errors = Object.entries(result)
+    .filter(([, r]) => !r.valid)
+    .map(([key, r]) => `${domain === "script" ? "sequence" : key}: ${r.error}`);
+  if (errors.length) {
+    throw new Error(`Home Assistant rejected the ${domain} configuration:\n${errors.join("\n")}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Whole-instance Session
 
 @validateRpc()
@@ -2038,45 +2373,31 @@ class HomeAssistantSessionImpl extends RpcTarget implements HomeAssistantSession
   }
 
   async listAreas(): Promise<AreaInfo[]> {
-    const list = await callWs(this.#ctx, async (ws) =>
-      ws.send<any[]>({ type: "config/area_registry/list" }),
-    );
+    const { list, appliedCount } = await listGroupsWithPending(this.#ctx, "area");
     const result = list.map(normalizeArea);
     await this.#ctx.approvalQueue.authorizeObservation({
       title: "List Home Assistant areas",
-      description: `Listed ${result.length} area${result.length === 1 ? "" : "s"}.`,
+      description: `Listed ${result.length} area${result.length === 1 ? "" : "s"}${pendingSuffix(appliedCount)}.`,
     });
     return result;
   }
 
   async listFloors(): Promise<FloorInfo[]> {
-    const list = await callWs(this.#ctx, async (ws) => {
-      try {
-        return await ws.send<any[]>({ type: "config/floor_registry/list" });
-      } catch {
-        return [];
-      }
-    });
+    const { list, appliedCount } = await listGroupsWithPending(this.#ctx, "floor");
     const result = list.map(normalizeFloor);
     await this.#ctx.approvalQueue.authorizeObservation({
       title: "List Home Assistant floors",
-      description: `Listed ${result.length} floor${result.length === 1 ? "" : "s"}.`,
+      description: `Listed ${result.length} floor${result.length === 1 ? "" : "s"}${pendingSuffix(appliedCount)}.`,
     });
     return result;
   }
 
   async listLabels(): Promise<LabelInfo[]> {
-    const list = await callWs(this.#ctx, async (ws) => {
-      try {
-        return await ws.send<any[]>({ type: "config/label_registry/list" });
-      } catch {
-        return [];
-      }
-    });
+    const { list, appliedCount } = await listGroupsWithPending(this.#ctx, "label");
     const result = list.map(normalizeLabel);
     await this.#ctx.approvalQueue.authorizeObservation({
       title: "List Home Assistant labels",
-      description: `Listed ${result.length} label${result.length === 1 ? "" : "s"}.`,
+      description: `Listed ${result.length} label${result.length === 1 ? "" : "s"}${pendingSuffix(appliedCount)}.`,
     });
     return result;
   }
@@ -2085,10 +2406,16 @@ class HomeAssistantSessionImpl extends RpcTarget implements HomeAssistantSession
     const list = await callWs(this.#ctx, async (ws) =>
       ws.send<any[]>({ type: "config/device_registry/list" }),
     );
-    const result = list.map(normalizeDevice);
+    // Only the devices matter here; the overlay applies pending device assignments and the
+    // cascades of pending label/area deletions to them.
+    const { snapshot, appliedCount } = overlayRegistry(
+      { areas: [], floors: [], labels: [], devices: list, entities: [], states: new Map() },
+      this.#ctx.listPendingActions(),
+    );
+    const result = snapshot.devices.map(normalizeDevice);
     await this.#ctx.approvalQueue.authorizeObservation({
       title: "List Home Assistant devices",
-      description: `Listed ${result.length} device${result.length === 1 ? "" : "s"}.`,
+      description: `Listed ${result.length} device${result.length === 1 ? "" : "s"}${pendingSuffix(appliedCount)}.`,
     });
     return result;
   }
@@ -2309,6 +2636,264 @@ class HomeAssistantSessionImpl extends RpcTarget implements HomeAssistantSession
       description: `Listed ${result.length} custom Lovelace resource${result.length === 1 ? "" : "s"}.`,
     });
     return result;
+  }
+
+  // ---- Automations, scripts, scenes ---------------------------------------
+
+  async listAutomations(): Promise<ConfigItemInfo[]> {
+    return await this.#listConfigItems("automation");
+  }
+
+  async listScripts(): Promise<ConfigItemInfo[]> {
+    return await this.#listConfigItems("script");
+  }
+
+  async listScenes(): Promise<ConfigItemInfo[]> {
+    return await this.#listConfigItems("scene");
+  }
+
+  async getAutomation(idOrEntityId: string): Promise<Automation> {
+    return await this.#openConfigItem("automation", idOrEntityId);
+  }
+
+  async getScript(keyOrEntityId: string): Promise<Script> {
+    return await this.#openConfigItem("script", keyOrEntityId);
+  }
+
+  async getScene(idOrEntityId: string): Promise<Scene> {
+    return await this.#openConfigItem("scene", idOrEntityId);
+  }
+
+  async createAutomation(config: AutomationConfig): Promise<string> {
+    return await this.#createConfigItem("automation", config);
+  }
+
+  async createScript(config: ScriptConfig, key?: string): Promise<string> {
+    return await this.#createConfigItem("script", config, key);
+  }
+
+  async createScene(config: SceneConfig): Promise<string> {
+    return await this.#createConfigItem("scene", config);
+  }
+
+  async #listConfigItems(domain: ConfigItemDomain): Promise<ConfigItemInfo[]> {
+    const { snapshot } = await this.#ctx.registrySnapshotWithOverlay();
+    const changes = pendingConfigItems(domain, this.#ctx.listPendingActions());
+    const items: ConfigItemInfo[] = [];
+    const listed = new Set<string>();
+    for (const item of configItemEntities(domain, snapshot)) {
+      const change = item.id === undefined ? undefined : changes.get(item.id);
+      if (change?.config === null) continue;
+      if (item.id !== undefined) listed.add(item.id);
+      items.push(configItemInfo(domain, item, item.id, change?.config, change ? "edit" : undefined));
+    }
+    for (const [id, change] of changes) {
+      if (listed.has(id) || change.config === null) continue;
+      items.push(configItemInfo(domain, undefined, id, change.config, "create"));
+    }
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: `List Home Assistant ${domain}s`,
+      description: `Listed ${items.length} ${domain}${items.length === 1 ? "" : "s"}${pendingSuffix(changes.size)}.`,
+    });
+    return items;
+  }
+
+  async #openConfigItem(domain: ConfigItemDomain, idOrEntityId: string): Promise<ConfigItemImpl> {
+    const items = configItemEntities(domain, await this.#ctx.registrySnapshot());
+    const change = pendingConfigItems(domain, this.#ctx.listPendingActions()).get(idOrEntityId);
+    let id: string;
+    if (idOrEntityId.startsWith(`${domain}.`)) {
+      const item = items.find((i) => i.entityId === idOrEntityId);
+      if (!item) throw new Error(`${domain} not found: ${idOrEntityId}`);
+      if (item.id === undefined) {
+        throw new Error(`${idOrEntityId} is defined in YAML without an id, so it can't be opened here.`);
+      }
+      id = item.id;
+    } else if (items.some((i) => i.id === idOrEntityId) || change?.created) {
+      id = idOrEntityId;
+    } else {
+      throw new Error(`${domain} not found: ${idOrEntityId}`);
+    }
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: `Open ${domain}`,
+      description: `Opened ${domain} \`${id}\`.`,
+    });
+    return new ConfigItemImpl(this.#ctx.fork(), domain, id);
+  }
+
+  async #createConfigItem(
+    domain: ConfigItemDomain,
+    config: Record<string, unknown>,
+    key?: string,
+  ): Promise<string> {
+    await this.#ctx.assertAdmin();
+    const body = withoutId(config);
+    await checkItemConfig(this.#ctx, domain, body);
+
+    // Ids in use, including object ids: a script's key is also its entity's object id.
+    const taken = new Set<string>(pendingConfigItems(domain, this.#ctx.listPendingActions()).keys());
+    for (const item of configItemEntities(domain, await this.#ctx.registrySnapshot())) {
+      taken.add(item.entityId.slice(domain.length + 1));
+      if (item.id !== undefined) taken.add(item.id);
+    }
+    let id: string;
+    if (domain === "script") {
+      if (key !== undefined && !isSlug(key)) {
+        throw new TypeError(
+          `Script key ${JSON.stringify(key)} must be lowercase letters, digits and single ` +
+            `underscores, e.g. "${slugify(key) || "goodnight"}".`,
+        );
+      }
+      if (key !== undefined && taken.has(key)) throw new Error(`A script with key "${key}" already exists.`);
+      const base = key ?? (slugify(configItemName(domain, body) ?? "") || "script");
+      id = base;
+      for (let n = 2; taken.has(id); n++) id = `${base}_${n}`;
+    } else {
+      // Home Assistant's editors use the creation time in milliseconds as the id.
+      let n = Date.now();
+      while (taken.has(String(n))) n++;
+      id = String(n);
+    }
+    await this.#ctx.submitWrite({ type: "saveConfigItem", domain, itemId: id, config: body, isNew: true });
+    return id;
+  }
+
+  // ---- Organisation -------------------------------------------------------
+
+  async listCategories(scope: string): Promise<CategoryInfo[]> {
+    assertCategoryScope(scope);
+    const { list, appliedCount } = await listGroupsWithPending(this.#ctx, "category", scope);
+    const result = list.map((c) => ({
+      id: String(c.category_id),
+      scope,
+      name: c.name ?? String(c.category_id),
+      icon: typeof c.icon === "string" ? c.icon : undefined,
+    }));
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: `List Home Assistant ${scope} categories`,
+      description:
+        `Listed ${result.length} categor${result.length === 1 ? "y" : "ies"}` +
+        `${pendingSuffix(appliedCount)}.`,
+    });
+    return result;
+  }
+
+  async createCategory(scope: string, name: string, icon?: string): Promise<string> {
+    assertCategoryScope(scope);
+    return await this.#createGroup("category", name, { icon }, scope);
+  }
+
+  async updateCategory(scope: string, categoryId: string, changes: CategoryChanges): Promise<void> {
+    assertCategoryScope(scope);
+    await this.#updateGroup("category", categoryId, changes, scope);
+  }
+
+  async deleteCategory(scope: string, categoryId: string): Promise<void> {
+    assertCategoryScope(scope);
+    await this.#deleteGroup("category", categoryId, scope);
+  }
+
+  async createLabel(name: string, options?: LabelChanges): Promise<string> {
+    return await this.#createGroup("label", name, options ?? {});
+  }
+
+  async updateLabel(labelId: string, changes: LabelChanges): Promise<void> {
+    await this.#updateGroup("label", labelId, changes);
+  }
+
+  async deleteLabel(labelId: string): Promise<void> {
+    await this.#deleteGroup("label", labelId);
+  }
+
+  async createArea(name: string, options?: AreaChanges): Promise<string> {
+    return await this.#createGroup("area", name, options ?? {});
+  }
+
+  async updateArea(areaId: string, changes: AreaChanges): Promise<void> {
+    await this.#updateGroup("area", areaId, changes);
+  }
+
+  async deleteArea(areaId: string): Promise<void> {
+    await this.#deleteGroup("area", areaId);
+  }
+
+  async createFloor(name: string, options?: FloorChanges): Promise<string> {
+    return await this.#createGroup("floor", name, options ?? {});
+  }
+
+  async updateFloor(floorId: string, changes: FloorChanges): Promise<void> {
+    await this.#updateGroup("floor", floorId, changes);
+  }
+
+  async deleteFloor(floorId: string): Promise<void> {
+    await this.#deleteGroup("floor", floorId);
+  }
+
+  async assignEntities(entityIds: string[], changes: EntityGroupingChanges): Promise<void> {
+    await this.#ctx.assertAdmin();
+    if (entityIds.length === 0) throw new TypeError("entityIds must not be empty.");
+    const known = new Set(
+      ((await this.#ctx.registrySnapshot()).entities as EntityRegistryEntry[]).map((e) => e.entity_id),
+    );
+    const missing = entityIds.filter((id) => !known.has(id));
+    if (missing.length) {
+      throw new Error(
+        `Not in Home Assistant's entity registry (entities without a unique id can't be ` +
+          `organised): ${missing.join(", ")}.`,
+      );
+    }
+    const { categories, labels, addLabels, removeLabels, areaId } = changes;
+    const assignment: AssignmentChanges = { categories, labels, addLabels, removeLabels, areaId };
+    const categoryNames = await checkAssignment(this.#ctx, assignment);
+    await this.#ctx.submitWrite({
+      type: "assignEntities",
+      entityIds: [...new Set(entityIds)],
+      items: [],
+      changes: assignment,
+      categoryNames,
+    });
+  }
+
+  async assignDevices(deviceIds: string[], changes: DeviceGroupingChanges): Promise<void> {
+    await this.#ctx.assertAdmin();
+    if (deviceIds.length === 0) throw new TypeError("deviceIds must not be empty.");
+    const known = new Set(((await this.#ctx.registrySnapshot()).devices as { id: string }[]).map((d) => d.id));
+    const missing = deviceIds.filter((id) => !known.has(id));
+    if (missing.length) throw new Error(`Device not found: ${missing.join(", ")}.`);
+    const { labels, addLabels, removeLabels, areaId } = changes;
+    const assignment: AssignmentChanges = { labels, addLabels, removeLabels, areaId };
+    await checkAssignment(this.#ctx, assignment);
+    await this.#ctx.submitWrite({ type: "assignDevices", deviceIds: [...new Set(deviceIds)], changes: assignment });
+  }
+
+  async #createGroup(kind: GroupKind, name: string, options: object, scope?: string): Promise<string> {
+    await this.#ctx.assertAdmin();
+    const fields = { ...registryFields(kind, options, true), name };
+    if (!name.trim()) throw new TypeError(`The ${kind} name must not be empty.`);
+    await this.#checkGroupFields(fields);
+    const actionId = await this.#ctx.submitWrite({ type: "saveGroup", kind, scope, fields });
+    return provisionalId(actionId);
+  }
+
+  async #updateGroup(kind: GroupKind, groupId: string, changes: object, scope?: string): Promise<void> {
+    await this.#ctx.assertAdmin();
+    const fields = registryFields(kind, changes, false);
+    if (Object.keys(fields).length === 0) throw new TypeError("No changes given.");
+    const currentName = (await groupNames(this.#ctx, kind, [groupId], scope))[groupId];
+    await this.#checkGroupFields(fields);
+    await this.#ctx.submitWrite({ type: "saveGroup", kind, scope, groupId, fields, currentName });
+  }
+
+  async #deleteGroup(kind: GroupKind, groupId: string, scope?: string): Promise<void> {
+    await this.#ctx.assertAdmin();
+    const name = (await groupNames(this.#ctx, kind, [groupId], scope))[groupId];
+    await this.#ctx.submitWrite({ type: "deleteGroup", kind, scope, groupId, name });
+  }
+
+  /** An area's floor and labels must exist. */
+  async #checkGroupFields(fields: Record<string, unknown>): Promise<void> {
+    if (typeof fields.floor_id === "string") await groupNames(this.#ctx, "floor", [fields.floor_id]);
+    if (Array.isArray(fields.labels)) await groupNames(this.#ctx, "label", fields.labels as string[]);
   }
 }
 
@@ -2855,8 +3440,8 @@ class EntityImpl extends RpcTarget implements Entity {
 
   // ---- Writes ---------------------------------------------------------
 
-  #submitServiceCall(service: string, data?: Record<string, unknown>): Promise<void> {
-    return this.#ctx.submitWrite({
+  async #submitServiceCall(service: string, data?: Record<string, unknown>): Promise<void> {
+    await this.#ctx.submitWrite({
       type: "callService",
       domain: this.#domain,
       service,
@@ -3171,6 +3756,178 @@ class DashboardImpl extends RpcTarget implements Dashboard {
       urlPath: this.#urlPath === "lovelace" ? null : this.#urlPath,
       config: config as unknown,
       origin: { kind: "dashboard", urlPath: this.#urlPath },
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Automation / script / scene
+
+/** What `getConfig()` returns: the configuration of whichever domain the item belongs to. */
+type ConfigItemConfig = AutomationConfig & ScriptConfig & SceneConfig;
+
+@validateRpc()
+class ConfigItemImpl extends RpcTarget implements Automation, Script, Scene {
+  #ctx: SessionContext;
+  #domain: ConfigItemDomain;
+  #itemId: string;
+
+  constructor(ctx: SessionContext, domain: ConfigItemDomain, itemId: string) {
+    super();
+    this.#ctx = ctx;
+    this.#domain = domain;
+    this.#itemId = itemId;
+  }
+
+  [Symbol.dispose](): void {
+    this.#ctx.dispose();
+  }
+
+  /** The configuration stored by Home Assistant's editor, or null (defined elsewhere in YAML, or
+   * its creation is still pending). */
+  async #stored(): Promise<Record<string, unknown> | null> {
+    await this.#ctx.assertAdmin();
+    return await callApi(this.#ctx, (r) => r.getItemConfig(this.#domain, this.#itemId));
+  }
+
+  #pendingChange() {
+    return pendingConfigItems(this.#domain, this.#ctx.listPendingActions()).get(this.#itemId);
+  }
+
+  #deletedError(): Error {
+    return new Error(`The ${this.#domain} "${this.#itemId}" is deleted by a pending action.`);
+  }
+
+  #notEditableError(): Error {
+    return new Error(
+      `The ${this.#domain} "${this.#itemId}" is defined in YAML outside Home Assistant's ` +
+        `${this.#domain} editor, so it can't be changed here.`,
+    );
+  }
+
+  async describe(): Promise<ConfigItemDetails> {
+    const [stored, { snapshot }] = await Promise.all([
+      this.#stored(),
+      this.#ctx.registrySnapshotWithOverlay(),
+    ]);
+    const change = this.#pendingChange();
+    if (change?.config === null) throw this.#deletedError();
+    const item = configItemEntities(this.#domain, snapshot).find((i) => i.id === this.#itemId);
+    if (!item && !change) throw new Error(`${this.#domain} not found: ${this.#itemId}`);
+    const info = configItemInfo(
+      this.#domain,
+      item,
+      this.#itemId,
+      change?.config ?? stored ?? undefined,
+      change ? (change.created && !stored ? "create" : "edit") : undefined,
+    );
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: `Describe ${this.#domain}: ${info.name}`,
+      description: `Read ${this.#domain} \`${this.#itemId}\`${pendingSuffix(change ? 1 : 0)}.`,
+    });
+    return { ...info, editable: stored !== null || change?.created === true };
+  }
+
+  async getConfig(): Promise<ConfigItemConfig> {
+    const change = this.#pendingChange();
+    let real = await this.#stored();
+    if (real === null && !change?.created) real = await this.#yamlConfig();
+    const { config, appliedCount } = overlayConfigItemConfig(
+      this.#domain,
+      this.#itemId,
+      real,
+      this.#ctx.listPendingActions(),
+    );
+    if (config === null) {
+      if (change?.config === null) throw this.#deletedError();
+      throw new Error(
+        `The configuration of ${this.#domain} "${this.#itemId}" can't be read: it is defined in ` +
+          `YAML outside Home Assistant's ${this.#domain} editor.`,
+      );
+    }
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: `Read ${this.#domain} config: ${configItemName(this.#domain, config) ?? this.#itemId}`,
+      description: `Read the configuration of ${this.#domain} \`${this.#itemId}\`${pendingSuffix(appliedCount)}.`,
+    });
+    // The config is the stored configuration of this item's domain.
+    return config as ConfigItemConfig;
+  }
+
+  /** Read-only configuration of an automation or script defined in YAML outside the editor.
+   * Home Assistant has no equivalent for scenes. */
+  async #yamlConfig(): Promise<Record<string, unknown> | null> {
+    if (this.#domain === "scene") return null;
+    const item = configItemEntities(this.#domain, await this.#ctx.registrySnapshot()).find(
+      (i) => i.id === this.#itemId,
+    );
+    if (!item) return null;
+    const result = await callWs(this.#ctx, (ws) =>
+      ws.send<{ config: Record<string, unknown> }>({ type: `${this.#domain}/config`, entity_id: item.entityId }),
+    );
+    return result.config;
+  }
+
+  async saveConfig(config: AutomationConfig | ScriptConfig | SceneConfig): Promise<void> {
+    const stored = await this.#stored();
+    const change = this.#pendingChange();
+    if (change?.config === null) throw this.#deletedError();
+    if (stored === null && !change?.created) throw this.#notEditableError();
+    const body = withoutId(config);
+    await checkItemConfig(this.#ctx, this.#domain, body);
+    const current = change?.config ?? stored;
+    await this.#ctx.submitWrite({
+      type: "saveConfigItem",
+      domain: this.#domain,
+      itemId: this.#itemId,
+      config: body,
+      isNew: stored === null,
+      changedFields: current ? changedTopLevelFields(current, body) : undefined,
+    });
+  }
+
+  async delete(): Promise<void> {
+    const stored = await this.#stored();
+    const change = this.#pendingChange();
+    if (change?.config === null) throw this.#deletedError();
+    if (stored === null) {
+      if (change?.created) {
+        throw new Error(
+          `The ${this.#domain} "${this.#itemId}" is only created by a pending action; reject that ` +
+            `action instead of deleting it.`,
+        );
+      }
+      throw this.#notEditableError();
+    }
+    await this.#ctx.submitWrite({
+      type: "deleteConfigItem",
+      domain: this.#domain,
+      itemId: this.#itemId,
+      name: configItemName(this.#domain, change?.config ?? stored) ?? this.#itemId,
+    });
+  }
+
+  async setCategory(categoryId: string | null): Promise<void> {
+    await this.#assign({ categories: { [this.#domain]: categoryId } });
+  }
+
+  async setLabels(labelIds: string[]): Promise<void> {
+    await this.#assign({ labels: labelIds });
+  }
+
+  async setArea(areaId: string | null): Promise<void> {
+    await this.#assign({ areaId });
+  }
+
+  async #assign(changes: AssignmentChanges): Promise<void> {
+    await this.#ctx.assertAdmin();
+    if (this.#pendingChange()?.config === null) throw this.#deletedError();
+    const categoryNames = await checkAssignment(this.#ctx, changes);
+    await this.#ctx.submitWrite({
+      type: "assignEntities",
+      entityIds: [],
+      items: [{ domain: this.#domain, itemId: this.#itemId }],
+      changes,
+      categoryNames,
     });
   }
 }

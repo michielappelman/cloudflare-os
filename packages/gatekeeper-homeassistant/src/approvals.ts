@@ -19,6 +19,7 @@ import {
   type RegistrySnapshot,
 } from "./homeassistant-api";
 import { resolveTargets } from "./registry-utils";
+import { describeAuthoringAction, isAuthoringAction } from "./authoring";
 import type { HATarget, HomeAssistantAction } from "./homeassistant";
 
 export { resolveTargets };
@@ -83,6 +84,7 @@ const REVERSIBLE_SERVICES = new Set([
 ]);
 
 export function canRevert(action: HomeAssistantAction): boolean {
+  if (isAuthoringAction(action)) return true;
   switch (action.type) {
     case "callService":
       return REVERSIBLE_SERVICES.has(action.service);
@@ -96,10 +98,13 @@ export function canRevert(action: HomeAssistantAction): boolean {
 // ---------------------------------------------------------------------------
 // Description authoring
 
+/** `pending` (the other queued actions) names groups that pending actions create. */
 export function describeAction(
   action: HomeAssistantAction,
   registry: RegistrySnapshot,
+  pending: readonly HomeAssistantAction[] = [],
 ): ActionDescription {
+  if (isAuthoringAction(action)) return describeAuthoringAction(action, registry, pending);
   switch (action.type) {
     case "callService":
       return describeCallService(action, registry);
@@ -413,8 +418,10 @@ function humanizeService(domain: string, service: string): string {
 // of the body, not nested under a `target` key, and has uneven support for area/label/floor
 // targets across HA versions).
 
+/** Performs a service call, event or dashboard save. Authoring actions apply through
+ * `applyAuthoringAction` instead, which also captures their revert information. */
 export async function executeAction(
-  action: HomeAssistantAction,
+  action: HomeAssistantAction & { type: "callService" | "fireEvent" | "saveDashboard" },
   creds: HomeAssistantCredentials,
 ): Promise<void> {
   await withWebSocket(creds, async (ws) => {

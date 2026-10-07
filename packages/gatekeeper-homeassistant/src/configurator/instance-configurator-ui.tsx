@@ -27,7 +27,7 @@ export default {
     return <Section>
       <Field
         label="Whole instance access"
-        description="This binding grants access to every area, device, entity, and dashboard on the connected Home Assistant instance.">
+        description="This binding grants access to every area, device, entity, dashboard, automation, script and scene on the connected Home Assistant instance, and to how they are organised.">
       </Field>
     </Section>;
   },

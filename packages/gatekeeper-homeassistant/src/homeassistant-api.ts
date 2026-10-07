@@ -182,10 +182,41 @@ export class HomeAssistantRest {
     return await fetchJson(this.creds, "api/services");
   }
 
+  // The config endpoints behind Home Assistant's automation / script / scene editors. They read
+  // and write automations.yaml / scripts.yaml / scenes.yaml, reload the domain after a write, and
+  // require an admin user.
+
+  /** The stored configuration of a UI-managed automation, script or scene, or null when the UI
+   * editors don't store it (defined elsewhere in YAML, or nonexistent). */
+  async getItemConfig(domain: string, id: string): Promise<Record<string, unknown> | null> {
+    try {
+      return await fetchJson(this.creds, itemConfigPath(domain, id));
+    } catch (e) {
+      if (e instanceof HomeAssistantError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  /** Create or replace a UI-managed item. Home Assistant validates the configuration first. */
+  async saveItemConfig(domain: string, id: string, config: Record<string, unknown>): Promise<void> {
+    await fetchJson(this.creds, itemConfigPath(domain, id), {
+      method: "POST",
+      body: JSON.stringify(config),
+    });
+  }
+
+  async deleteItemConfig(domain: string, id: string): Promise<void> {
+    await fetchJson(this.creds, itemConfigPath(domain, id), { method: "DELETE" });
+  }
+
   /** Quick check that the API is reachable and credentials are valid. */
   async ping(): Promise<{ message: string }> {
     return await fetchJson(this.creds, "api/");
   }
+}
+
+function itemConfigPath(domain: string, id: string): string {
+  return `api/config/${encodeURIComponent(domain)}/config/${encodeURIComponent(id)}`;
 }
 
 // ---------------------------------------------------------------------------
