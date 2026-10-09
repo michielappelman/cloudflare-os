@@ -13,6 +13,8 @@ import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogl
 import { GoogleDocSession, DocMetadata, type GoogleDocReadSession, type GoogleDocTab } from "./docs-types";
 import { GoogleDocsApi, type GoogleDocsDocument, type GoogleDocsTab } from "./docs-api";
 import { GoogleSheetsApi } from "./sheets-api";
+import { GoogleSlidesApi } from "./slides-api";
+import { getGoogleSlidesTypesCode, type GoogleSlidesGatekeeperImplProps } from "./slides";
 import type {
   GoogleSpreadsheetReadSession, GoogleSpreadsheetSession, SpreadsheetInfo, SpreadsheetRange,
   SpreadsheetValueMode,
@@ -68,6 +70,7 @@ import {
   GmailConfiguratorUI,
   GoogleDocConfiguratorUI,
   GoogleSheetsConfiguratorUI,
+  GoogleSlidesConfiguratorUI,
   DriveAccountConfiguratorUI,
   DriveFileConfiguratorUI,
   DriveFolderConfiguratorUI,
@@ -80,6 +83,7 @@ import CHAT_THREAD_CONFIGURATOR_HTML from "./generated/chat-thread-configurator-
 import GMAIL_CONFIGURATOR_HTML from "./generated/gmail-configurator-ui.txt";
 import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui.txt";
 import GOOGLE_SHEETS_CONFIGURATOR_HTML from "./generated/google-sheets-configurator-ui.txt";
+import GOOGLE_SLIDES_CONFIGURATOR_HTML from "./generated/google-slides-configurator-ui.txt";
 import DRIVE_ACCOUNT_CONFIGURATOR_HTML from "./generated/drive-account-configurator-ui.txt";
 import DRIVE_FILE_CONFIGURATOR_HTML from "./generated/drive-file-configurator-ui.txt";
 import DRIVE_FOLDER_CONFIGURATOR_HTML from "./generated/drive-folder-configurator-ui.txt";
@@ -90,7 +94,8 @@ import {
   BIGQUERY_HOST, BIGQUERY_RESOURCE, GMAIL_RESOURCE, GOOGLE_CALENDAR_RESOURCE,
   GOOGLE_CHAT_RESOURCE, GOOGLE_CHAT_SPACE_RESOURCE, GOOGLE_CHAT_THREAD_RESOURCE,
   GOOGLE_DOC_RESOURCE, GOOGLE_DRIVE_FILE_RESOURCE, GOOGLE_DRIVE_FOLDER_RESOURCE,
-  GOOGLE_DRIVE_RESOURCE, GOOGLE_SHEETS_RESOURCE, RESOURCE_BY_KIND, SUPPORTED_RESOURCES,
+  GOOGLE_DRIVE_RESOURCE, GOOGLE_SHEETS_RESOURCE, GOOGLE_SLIDES_RESOURCE, RESOURCE_BY_KIND,
+  SUPPORTED_RESOURCES,
   grantedResourceUrlPatterns, hasDriveResourceGrant, parseResourceUrl,
   recordedResourceUrlPatterns, type RecordedResourceGrant,
 } from "./resources";
@@ -107,7 +112,7 @@ import {
   type GoogleOAuthEnv,
 } from "./oauth";
 import {
-  DOCS_TYPES_MODULE_PREFIX, DRIVE_TYPES_MODULE_PREFIX, stripTypeModulePrefix,
+  DOCS_TYPES_MODULE_PREFIX, DRIVE_TYPES_MODULE_PREFIX, GMAIL_TYPES_MODULE_PREFIX, stripTypeModulePrefix,
 } from "./type-bundle";
 
 let googleDocTypesCode: string | undefined;
@@ -139,7 +144,9 @@ import type {GoogleChatGatekeeperImplProps} from "./chat";
 export { GmailGatekeeperImpl } from "./gmail";
 export { GoogleChatGatekeeperImpl } from "./chat";
 export { ChatHookController, ChatHookDriver } from "./chat-hooks";
-import { handleChatPush, type ChatHooksEnv } from "./chat-hooks";
+export { GmailHookController, GmailHookDriver } from "./gmail-hooks";
+export { GoogleSlidesGatekeeperImpl } from "./slides";
+import { handlePubSubPush, type PushHooksEnv } from "./pubsub-push";
 
 // Vendor id = GATEKEEPER_<NAME> binding suffix (lowercased).
 const VENDOR_ID = "google";
@@ -172,7 +179,7 @@ function generateNonce(): string {
 
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
-type Env = Cloudflare.Env & GoogleOAuthEnv & ChatHooksEnv & {
+type Env = Cloudflare.Env & GoogleOAuthEnv & PushHooksEnv & {
   // OAuth app credentials (wrangler secrets / .dev.vars); not in wrangler.jsonc.
   CLIENT_ID?: string;
   CLIENT_SECRET?: string;
@@ -272,7 +279,7 @@ export default {
 
       return Response.redirect(newUrl.toString(), 302);
     } else if (relPath === "/pubsub" && req.method === "POST") {
-      return handleChatPush(req, env, ctx.exports);
+      return handlePubSubPush(req, env, ctx.exports);
     } else if (relPath === "/oauth") {
       // Completion redirect.
 
@@ -346,13 +353,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://google.com",
       logo: { url: GOOGLE_LOGO_URL },
       color: "#e8f0fe",
-      tagline: "Draft replies, edit docs, read sheets, search Drive, manage calendars, post to Chat, and analyze data",
+      tagline: "Draft replies, edit docs, read sheets and slides, search Drive, manage calendars, post to Chat, and analyze data",
       description:
           "Connect your Google account to give Cloudflare OS access to Gmail, Google Docs, Google " +
-          "Sheets, Google Drive, Google Calendar, Google Chat, and BigQuery. Build agents that " +
-          "triage email, draft and edit documents, read spreadsheets, search Drive and read " +
-          "native Docs and Sheets, find focus time, schedule meetings, follow and post to Chat " +
-          "conversations, or run analytics queries on your data.",
+          "Sheets, Google Slides, Google Drive, Google Calendar, Google Chat, and BigQuery. Build " +
+          "agents that triage email, draft and edit documents, read spreadsheets and " +
+          "presentations, search Drive and read native Docs and Sheets, find focus time, " +
+          "schedule meetings, follow and post to Chat conversations, or run analytics queries on " +
+          "your data.",
       providesAuth: true,
     };
   }
@@ -387,8 +395,9 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async getTypeScriptTypes(): Promise<string> {
     return [
-      TYPES_CODE, getGoogleDocTypesCode(), SHEETS_TYPES_CODE, CALENDAR_TYPES_CODE,
-      BIGQUERY_TYPES_CODE, getDriveAgentTypesCode(), CHAT_TYPES_CODE,
+      stripTypeModulePrefix(TYPES_CODE, GMAIL_TYPES_MODULE_PREFIX), getGoogleDocTypesCode(),
+      SHEETS_TYPES_CODE, getGoogleSlidesTypesCode(), CALENDAR_TYPES_CODE, BIGQUERY_TYPES_CODE,
+      getDriveAgentTypesCode(), CHAT_TYPES_CODE,
     ].join("\n");
   }
 }
@@ -780,6 +789,12 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         };
         return {class: this.ctx.exports.GoogleSheetsGatekeeperImpl({props}), resource};
       }
+      case "slides": {
+        let props: GoogleSlidesGatekeeperImplProps = {
+          userObjectId, presentationId: target.presentationId,
+        };
+        return {class: this.ctx.exports.GoogleSlidesGatekeeperImpl({props}), resource};
+      }
       case "calendar": {
         let props: GoogleCalendarGatekeeperImplProps = {
           userObjectId, calendarId: target.calendarId, availabilityMode: target.availabilityMode,
@@ -858,6 +873,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {
         iframeHtml: GOOGLE_SHEETS_CONFIGURATOR_HTML,
         ui: new RpcStub(new GoogleSheetsConfiguratorUI(getToken)),
+      };
+    }
+
+    if (resourceUrlPattern === GOOGLE_SLIDES_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GOOGLE_SLIDES_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GoogleSlidesConfiguratorUI(getToken)),
       };
     }
 
@@ -967,6 +989,8 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 //     own token can open the bound document (Docs API returns 401/403/404 otherwise).
 //   - Google Sheets — strategy B (ACL check, single unit): hasSpreadsheetAccess answers whether the
 //     observer's own token can open the bound spreadsheet.
+//   - Google Slides — strategy B (ACL check, single unit): hasPresentationAccess answers whether the
+//     observer's own token can open the bound presentation.
 //   - Google Calendar — strategies B/C: hasCalendarWriterAccess covers the bound calendar, while
 //     hasCalendarFreeBusyAccess covers foreign calendars read by an all-visible availability query.
 //   - BigQuery — strategy C (data-set tracking by dataset): hasDatasetAccess answers whether the
@@ -1028,6 +1052,17 @@ export class GoogleVerifier extends WorkerEntrypoint<Env, GoogleVerifierProps>
     let api = new GoogleSheetsApi(opts => this.#getToken(opts));
     try {
       await api.getSpreadsheet(spreadsheetId);
+      return true;
+    } catch (error) {
+      if (isNoAccessStatus(httpStatusFromError(error))) return false;
+      throw error;
+    }
+  }
+
+  async hasPresentationAccess(presentationId: string): Promise<boolean> {
+    let api = new GoogleSlidesApi(opts => this.#getToken(opts));
+    try {
+      await api.getPresentationTitle(presentationId);
       return true;
     } catch (error) {
       if (isNoAccessStatus(httpStatusFromError(error))) return false;
