@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, PushSubscriptionInfo } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, PushSubscriptionInfo, NotificationSubscriber, UserNotification } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -20,6 +20,7 @@ import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./a
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import { base64UrlDecode, checkPushEndpoint, generateVapidKeys, sendPushNotification, type PushNotification, type VapidKeys } from "./web-push.js";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
+import { deliver, registerDevice } from "./notification-service.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -187,6 +188,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
+  #notificationSubscribers = new Map<object, RpcStub<NotificationSubscriber>>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -341,6 +343,54 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Whether this account has a password set (false for gatekeeper sign-in accounts). */
   async hasPasswordLogin(): Promise<boolean> {
     return this.storage.passwordHashHash.get() !== null;
+  }
+
+  /** Exchange the native app's one-time device registration for that device's push subscription. */
+  async registerNotificationDevice(deviceRegistrationId: string): Promise<void> {
+    let { deviceKey, subscriptionId } = await registerDevice(this.env, deviceRegistrationId);
+    this.storage.notificationSubscriptions.put(
+        { ...this.storage.notificationSubscriptions.get(), [deviceKey]: subscriptionId });
+  }
+
+  /** Subscribe a visible authenticated client to live user notifications. */
+  async subscribeToNotifications(
+      subscriber: RpcStub<NotificationSubscriber>): Promise<RpcStub<{}>> {
+    subscriber = subscriber.dup();
+    let token = {};
+    this.#notificationSubscribers.set(token, subscriber);
+    let unsubscribe = () => {
+      let existing = this.#notificationSubscribers.get(token);
+      if (!existing) return;
+      this.#notificationSubscribers.delete(token);
+      existing[Symbol.dispose]();
+    };
+    subscriber.onRpcBroken(unsubscribe);
+    return new RpcStub<{}>({ [Symbol.dispose]: unsubscribe });
+  }
+
+  /**
+   * Offer a notification to visible clients; push it to every registered device unless one
+   * acknowledges within 3s.
+   */
+  async publishNotification(notification: UserNotification): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let acknowledged = await Promise.race([
+      Promise.any([...this.#notificationSubscribers.values()]
+          .map(subscriber => subscriber.notify(notification))).then(() => true, () => false),
+      new Promise<boolean>(resolve => { timeout = setTimeout(() => resolve(false), 3_000); }),
+    ]).finally(() => clearTimeout(timeout));
+    if (acknowledged) return;
+    let subscriptions = Object.entries(this.storage.notificationSubscriptions.get());
+    let results = await Promise.allSettled(subscriptions.map(async ([deviceKey, subscriptionId]) => {
+      if (await deliver(this.env, subscriptionId, notification)) return;
+      // This subscription is dead; the device gets a new one when its app next opens. Keep one it
+      // registered while this delivery was in flight.
+      let { [deviceKey]: current, ...others } = this.storage.notificationSubscriptions.get();
+      if (current === subscriptionId) this.storage.notificationSubscriptions.put(others);
+    }));
+    for (let result of results) {
+      if (result.status === "rejected") throw result.reason;
+    }
   }
 
   async changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {

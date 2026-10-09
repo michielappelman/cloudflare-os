@@ -178,6 +178,34 @@ export interface ConnectedAccountsSubscriber {
   ready(): void;
 }
 
+/** A notification delivered to one authenticated user. */
+export type UserNotification = {
+  /** Stable identifier shared by the live and push delivery attempts. */
+  id: string;
+
+  /** Whether the task finished or is paused on a connection or action-approval prompt. */
+  kind: "taskCompleted" | "permissionRequested";
+
+  /** Workspace containing the task. */
+  workspaceId: string;
+
+  /** Chat containing the task. */
+  chatId: number;
+
+  /** Current human-readable chat title. */
+  chatTitle: string;
+};
+
+/** Callback used by `AuthenticatedApi.subscribeToNotifications()`. */
+export interface NotificationSubscriber extends RpcTarget {
+  /**
+   * Present a notification to the active user. Resolve only once the user has seen it, or is
+   * already viewing its chat; if no subscriber resolves promptly, the backend falls back to mobile
+   * push delivery.
+   */
+  notify(notification: UserNotification): Promise<void>;
+}
+
 /**
  * When listing gatekeeper vendors or connected accounts, you can filter to only vendors/accounts
  * that support certain features. This type specifies the filter.
@@ -491,6 +519,20 @@ export interface AuthenticatedApi extends RpcTarget {
    * which case the change-password UI should be hidden.
    */
   hasPasswordLogin(): Promise<boolean>;
+
+  /**
+   * Connect the native app's one-time central device registration to this authenticated user. Each
+   * registered device gets push; a device that registers again replaces its own subscription. The
+   * deployment never receives an APNs device token or Cloudflare account token.
+   */
+  registerNotificationDevice(deviceRegistrationId: string): Promise<void>;
+
+  /**
+   * Subscribe while this client can visibly present notifications. Dispose the returned handle
+   * when the page becomes hidden so the backend can promptly fall back to mobile push.
+   */
+  subscribeToNotifications(
+      subscriber: RpcStub<NotificationSubscriber>): Promise<RpcStub<{}>>;
 
   /**
    * List the user's configured AI models.

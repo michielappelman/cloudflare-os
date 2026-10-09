@@ -465,8 +465,8 @@ export default function GadgetEditor() {
   const { authenticatedApi } = useAuthenticatedApi()
   const publicApi = useRpcStub()
 
-  const { chat: chatParam, w: workpieceParam } = useSearch({ strict: false }) as
-    { chat?: number; w?: number }
+  const { chat: chatParam, w: workpieceParam, showChat: showChatParam } =
+    useSearch({ strict: false }) as { chat?: number; w?: number; showChat?: true }
   const urlChatId = chatParam !== undefined ? chatParam : null
   const urlWorkpieceId = workpieceParam !== undefined ? workpieceParam : null
 
@@ -1145,6 +1145,22 @@ export default function GadgetEditor() {
     turnOutputRef.current = null
     setUserNavigatedToList(false)
   }, [id])
+
+  // ?showChat (a notification's "Open task") asks to see the chat, not merely select it: full-screen
+  // preview covers it, and on a phone so does the pane. Declared after the reset above, so arriving
+  // from another workspace beats its stored view; dropped once honoured, so the next request for
+  // the same chat works too.
+  useEffect(() => {
+    if (!showChatParam) return
+    exitGadgetFullscreen()
+    if (isSinglePaneLayout()) setWorkspaceVisibility('closed')
+    navigate({
+      to: '/workspace/$id',
+      params: { id: id! },
+      search: (prev: Record<string, unknown>) => ({ ...prev, showChat: undefined }),
+      replace: true,
+    })
+  }, [showChatParam, id, navigate, setWorkspaceVisibility, exitGadgetFullscreen])
 
   // ── navigation helper ────────────────────────────────────────────────────────
   const navigateToChat = useCallback(

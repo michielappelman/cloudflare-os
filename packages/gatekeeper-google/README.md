@@ -8,7 +8,7 @@ This package provides Google OAuth integration for Gadgets. It serves two purpos
   which becomes the user's identity.
   The sign-in grant is transient (discarded right after the email is read).
 - **Connections:** when a user connects Google (or signs in and later connects it), the scopes for
-  the selected resources (Gmail, Docs, Sheets, Drive, Calendar, or BigQuery — see below) are requested
+  the selected resources (Gmail, Docs, Sheets, Slides, Drive, Calendar, or BigQuery — see below) are requested
   so gadgets can access those APIs on the user's behalf.
 
 A single Google OAuth client is used for both. Set it up as follows.
@@ -29,7 +29,7 @@ If you're running this project locally and want to use Google API integrations, 
 
 ### Step 2: Enable Required APIs
 
-You'll need to enable the Google APIs that you want to use. Currently supported: Gmail, Google Docs, Google Sheets, Google Drive, Google Calendar, Google Chat, and BigQuery.
+You'll need to enable the Google APIs that you want to use. Currently supported: Gmail, Google Docs, Google Sheets, Google Slides, Google Drive, Google Calendar, Google Chat, and BigQuery.
 
 1. In the left sidebar, go to **APIs & Services** > **Library** (or [click here](https://console.cloud.google.com/apis/library))
 2. Search for "Gmail API"
@@ -44,16 +44,19 @@ You'll need to enable the Google APIs that you want to use. Currently supported:
 11. Go back to the Library, search for "Google Sheets API"
 12. Click on **Google Sheets API** in the results
 13. Click **Enable**
-14. Go back to the Library, search for "Google Calendar API"
-15. Click on **Google Calendar API** in the results
+14. Go back to the Library, search for "Google Slides API"
+15. Click on **Google Slides API** in the results
 16. Click **Enable**
-17. Go back to the Library, search for "BigQuery API"
-18. Click on **BigQuery API** in the results
+17. Go back to the Library, search for "Google Calendar API"
+18. Click on **Google Calendar API** in the results
 19. Click **Enable**
-20. For Chat, enable **Google Chat API**, plus **People API** so direct messages and group chats can be named when Chat omits a participant's name, and so a whole-account Chat connection can search the organization's directory and confirm that everyone in a conversation it starts belongs to the organization.
-21. On the Google Chat API's **Configuration** tab, set an app name, avatar URL, and description, turn off **Interactive features**, and click **Save**. Reads work without this, but Google refuses every Chat send, edit, and reaction until a Chat app is configured.
+20. Go back to the Library, search for "BigQuery API"
+21. Click on **BigQuery API** in the results
+22. Click **Enable**
+23. For Chat, enable **Google Chat API**, plus **People API** so direct messages and group chats can be named when Chat omits a participant's name, and so a whole-account Chat connection can search the organization's directory and confirm that everyone in a conversation it starts belongs to the organization.
+24. On the Google Chat API's **Configuration** tab, set an app name, avatar URL, and description, turn off **Interactive features**, and click **Save**. Reads work without this, but Google refuses every Chat send, edit, and reaction until a Chat app is configured.
 
-The Google Drive API powers the Docs and Sheets resource pickers, Drive discovery, and Drive scope checks. Native document or spreadsheet content opened from a Drive binding is read through the Google Docs or Google Sheets API. Direct Google Doc reads and edits still go through the Docs API, and direct spreadsheet reads go through the Sheets API.
+The Google Drive API powers the Docs, Sheets, and Slides resource pickers, Drive discovery, and Drive scope checks. Native document or spreadsheet content opened from a Drive binding is read through the Google Docs or Google Sheets API. Direct Google Doc reads and edits still go through the Docs API, direct spreadsheet reads go through the Sheets API, and direct presentation reads go through the Slides API.
 
 ### Step 3: Configure the OAuth Consent Screen
 
@@ -77,8 +80,9 @@ included). Across all resource types, the gatekeeper can request:
 - `openid`, `userinfo.profile`, and `userinfo.email` to identify the connected account.
 - `gmail.modify` for Gmail thread reads, organization, replies, forwards, and sending. This single scope already includes label access and sending.
 - `documents` for direct Google Docs reads and edits; `documents.readonly` for native Docs opened from account-wide, folder, or exact-file Drive bindings.
-- `drive.metadata.readonly` for the Docs, Sheets, and folder pickers, account-wide Drive discovery, exact-file metadata, folder descendant proofs, and native-file scope checks. Google classifies this as a restricted scope, so every Drive resource here needs restricted-scope verification.
+- `drive.metadata.readonly` for the Docs, Sheets, Slides, and folder pickers, account-wide Drive discovery, exact-file metadata, folder descendant proofs, and native-file scope checks. Google classifies this as a restricted scope, so every Drive resource here needs restricted-scope verification.
 - `spreadsheets.readonly` to read metadata and bounded cell ranges from directly selected spreadsheets or native Sheets opened from account-wide, folder, or exact-file Drive bindings.
+- `presentations` to read the slides, text, and speaker notes of directly selected presentations, and to render slide thumbnails. Google Slides bindings are read-only today; the read-write scope is requested now so that adding edits to this same resource will not retract every existing grant and force a reconnect. Google counts each thumbnail as an expensive read, limited to 60 a minute per user and 300 per project.
 - `calendar.calendarlist.readonly` so the resource picker can list calendars.
 - `calendar.events` to manage selected calendar and check calendar availability.
 - `chat.spaces.readonly`, `chat.messages`, and `chat.memberships.readonly` for every Chat resource. A whole-account Chat connection adds `chat.users.readstate.readonly` for its unread-only search, and `chat.spaces.create` and `directory.readonly` to start direct messages and group chats with people in the connected account's Workspace directory. Starting a conversation is its own approval kind, separate from sending in an existing one, and people outside the organization can't be added to a new conversation.
@@ -138,25 +142,26 @@ User — see Step 4.)
 2. Create or open a gadget.
 3. Navigate to the **Connections** tab.
 4. Click **+ New Connection**.
-5. Choose a Google resource type: Gmail, Google Doc, Google Spreadsheet, Google Drive Account, Google Drive Folder, Google Drive File, Google Calendar, or BigQuery.
+5. Choose a Google resource type: Gmail, Google Doc, Google Spreadsheet, Google Slides Presentation, Google Drive Account, Google Drive Folder, Google Drive File, Google Calendar, or BigQuery.
 6. If prompted, connect a Google account.
 7. You should be redirected to Google's consent screen in a new tab.
 8. The consent screen acts extra-scary since this is an "unverified" test app.
 9. After granting access, the tab closes, and you're back to Gadgets.
-10. Use the picker to choose the mailbox scope, document, folder, Drive file, project, dataset, or table to connect. (The Google Drive Account resource covers the whole account, so it has no picker.)
+10. Use the picker to choose the mailbox scope, document, presentation, folder, Drive file, project, dataset, or table to connect. (The Google Drive Account resource covers the whole account, so it has no picker.)
 11. Create the connection. Ask the agent what it can do, or ask it to write a gadget using the new binding.
 
 You can also see your connected accounts and add and remove them in the settings (accessed through the account menu in the upper-right).
 
-## Google Chat new-message hooks (optional)
+## Google Chat and Gmail new-message hooks (optional)
 
-Gadgets can watch a Chat conversation for new messages (see `docs/google-chat-capabilities.md`).
-Google delivers them through Workspace Events and Pub/Sub, so this needs a public URL and these
-steps in the same Cloud project as the OAuth client:
+Gadgets can watch a Chat conversation for new messages (see `docs/google-chat-capabilities.md`),
+and a Gmail inbox, label or thread for new mail (`subscribeNewMessages()` in `src/types.d.ts`).
+Google delivers both through Pub/Sub, Chat's by Workspace Events and Gmail's by `users.watch`, so
+this needs a public URL and these steps in the same Cloud project as the OAuth client:
 
-1. Enable the **Google Workspace Events API** and the **Cloud Pub/Sub API**.
-2. Create a Pub/Sub topic, and grant `chat-api-push@system.gserviceaccount.com` the **Pub/Sub
-   Publisher** role on it.
+1. Enable the **Google Workspace Events API**, the **Cloud Pub/Sub API**, and the **Gmail API**.
+2. Create a Pub/Sub topic, and grant both `chat-api-push@system.gserviceaccount.com` and
+   `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role on it.
 3. Create a service account for push authentication (it needs no roles).
 4. Create a **push** subscription on the topic with endpoint
    `${BASE_URL}/pubsub` (e.g. `https://example.com/gatekeeper/google/pubsub`), **Enable
@@ -173,8 +178,10 @@ the worker instead accepts only pushes whose Google-signed token names that endp
 and `PUBSUB_PUSH_SERVICE_ACCOUNT` as sender. That token proves a push came through the push
 subscription, not who published to the topic, so the topic's Pub/Sub principals are trusted with
 hooked messages: anyone who can subscribe to it reads them all, and anyone who can publish to it
-can inject messages into hooks. Grant those roles to no one beyond step 2. Without these settings
-hooks are refused and everything else works as before.
+can inject messages into hooks. Grant those roles to no one beyond step 2. A Gmail push carries
+only a mailbox address and a history ID, so a forged one can only make the worker read that
+mailbox's new history with the connected account's own credentials. Without these settings hooks
+are refused and everything else works as before.
 
 ## Worker Preview OAuth callbacks
 
@@ -200,6 +207,11 @@ stores baseline and Preview secrets separately, so provision the same signing va
 
 Very large Google Docs can exceed Durable Objects' 2 MB value limit after Markdown conversion,
 causing tab listing, content reads, and edits to fail.
+
+A Google Slides presentation's slide summaries come from one response capped at 10 MiB. It holds
+the text of every slide's shapes and speaker notes, but no styles or geometry: about 4 KiB a slide
+on a live deck, so a presentation needs thousands of slides to exceed it. Slide content is read
+one slide at a time, capped at 2 MiB each.
 
 ## Google Drive read-only bindings
 
