@@ -303,6 +303,9 @@ export function makeStoredAssistantMessage(message: AssistantMessage): StoredAss
 export interface AgentHooks {
   getChatAgentContext(chatId: number): AiChatAgentContext;
 
+  /** Records the chat's AiChatAgentContext.workspacePrompt. */
+  setChatWorkspacePrompt(chatId: number, workspacePrompt: string): void;
+
   /**
    * The step's persistence barrier: in one storage transaction, persist the step's chat
    * messages (`msgs`, the tool-call record among them), validate and append each buffered
@@ -589,6 +592,16 @@ export interface AgentHooks {
   consumeCapturedConnectionRequests(chatId: number): AiChatMessageBody[];
 
   /**
+   * Mint a gatekeeper simulating a new resource of a creatable type, and queue the creation for
+   * the user's approval. Unlike requestConnection, nothing waits on the user: the gatekeeper
+   * simulates the resource until the creation applies. Throws an agent-readable message when the
+   * request can't be met.
+   */
+  createExternalResource(
+      chatId: number, input: Extract<AiToolCall, {toolName: "createExternalResource"}>["input"])
+      : Promise<{gatekeeperId: WorkpieceId}>;
+
+  /**
    * Blueprint hooks for the agent.
    *
    * List the blueprints available to the turn's initiator (their own published blueprints, their
@@ -639,7 +652,7 @@ You are a helpful assistant who helps users get things done. You can answer ques
 
 # Workspaces
 
-You are working within a "workspace". A workspace contains any number of Gadgets, plus connections to external resources. Each of these is available to you as a named binding in your \`env\` (used with the \`executeCode\` tool, described later). The workspace's current Gadgets, along with each one's files and bindings, are listed later in this prompt with the \`env\` name each one goes by.
+You are working within a "workspace". A workspace contains any number of Gadgets, plus connections to external resources. Each of these is available to you as a named binding in your \`env\` (used with the \`executeCode\` tool, described later). The workspace's Gadgets as of the start of this session, along with each one's files and bindings, are listed later in this prompt with the \`env\` name each one goes by.
 
 A new workspace contains no Gadgets. You can answer questions, read connected resources, and perform one-off tasks with \`executeCode\` without creating a Gadget. Create one (via the \`createGadget\` tool) only when the user's request or established context clearly calls for a new application or saved output. An empty workspace or a task that needs code is not by itself a reason to create one.
 
@@ -1257,6 +1270,10 @@ List the resource types a gatekeeper vendor offers, so you can construct a resou
 
 let REQUEST_CONNECTION_TOOL_DESCRIPTION = `
 Ask the user to connect a gatekeeper resource (e.g. a ClickHouse cluster, a GitHub repo). Pre-configure as much as you can: always pass vendorId, and pass resourceUrl when you can infer it (use listConnectableResources to learn the URL patterns). The request must resolve to a specific resource: if you pass a resourceUrl it must match one of the vendor's patterns, and if the vendor offers multiple resource types with no whole-instance option you MUST pass a matching resourceUrl. Otherwise the call is rejected with guidance and no card is shown — fix the request and try again. You also choose \`bindingName\`: the name the resource will have in your env once connected (you know why you want the resource, so pick a name that reflects its role). On success this shows the user an accept/deny card in the chat. It does NOT block: your turn ends after a successful call, and you will be resumed once the user accepts (the resource becomes available as \`env.<bindingName>\`, which you can describeBinding and use from executeCode; wire it into a Gadget with setGadgetBinding only if the Gadget's code needs it) or denies (your turn simply ends; wait for the user's next message).
+`.trim();
+
+let CREATE_EXTERNAL_RESOURCE_TOOL_DESCRIPTION = `
+Create a new external resource (e.g. a new document), for resource types listConnectableResources marks creatable; requestConnection is for resources that already exist. The resource is immediately available as \`env.<bindingName>\` and your turn continues. It is created at the provider, in an account the user chooses, only once they approve the creation; until then it is simulated, and changes you make to it apply after the creation.
 `.trim();
 
 // =======================================================================================
@@ -2403,6 +2420,16 @@ async function runAgentPass(
                 case "requestConnection":
                   toolOutput = {text: toolCall.output ?? ""};
                   break;
+                case "createExternalResource":
+                  // Like createGadget: replay re-binds the recorded gatekeeper, never re-creates.
+                  if (toolCall.output === undefined) {
+                    throw new Error(
+                        "createExternalResource tool call in log is missing its result");
+                  }
+                  chatBindings.set(toolCall.input.bindingName,
+                      {type: "workpiece", id: toolCall.output.gatekeeperId});
+                  toolOutput = {text: jsonToolResultText(toolCall.output)};
+                  break;
                 default:
                   toolCall satisfies never;
                   throw new Error("Unknown tool.");
@@ -2867,6 +2894,8 @@ async function runAgentPass(
   // system-prompt-blocks.ts), so the static prefix stays cached when the project-specific part
   // changes.
   let systemPromptSlots: [string, string];
+  // The regular agent's list of the workspace's gadgets, built for this pass.
+  let systemPromptWorkspace: string | undefined;
 
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt. Spawned agents see only the
@@ -2906,16 +2935,13 @@ async function runAgentPass(
 
     // Let's include each gadget's list of files in the system prompt so that the agent doesn't
     // have to call a tool to list files at the start of every thread. In order to avoid cache
-    // misses, we specifically list the files that existed at the start of the thread even if the
-    // agent adds or removes files during the thread. (An unpinned gadget's list can still change
-    // between turns if mainline moves -- a cache miss, but files rarely churn concurrently to a
-    // chat within the cache TTL.)
-    let systemPromptWorkspace: string;
+    // misses, we list the gadgets and files as of the start of the thread (or of its latest
+    // compaction), even if they change during it (see AiChatAgentContext.workspacePrompt).
     if (gadgetInfos.length == 0) {
       systemPromptWorkspace =
-          "This workspace does not contain any gadgets yet. You can use connected resources " +
-          "and executeCode without one. Use `createGadget` tool only when the task calls for a new " +
-          "application or saved output, before writing that gadget's files.";
+          "As of the start of this session, this workspace contained no gadgets. You can use " +
+          "connected resources and executeCode without one. Use `createGadget` tool only when the " +
+          "task calls for a new application or saved output, before writing that gadget's files.";
     } else {
       let sections: string[] = [];
       for (let info of gadgetInfos) {
@@ -2979,6 +3005,10 @@ async function runAgentPass(
       }
       systemPromptWorkspace = `# This workspace's gadgets\n\n${sections.join("\n\n")}`;
     }
+    let savedWorkspace = checkpoint ? checkpoint.workspacePrompt : agentContext.workspacePrompt;
+    if (checkpoint === undefined && savedWorkspace === undefined) {
+      hooks.setChatWorkspacePrompt(chatId, systemPromptWorkspace);
+    }
 
     // Named in the prompt because the request that should trigger them ("make me a doc") may
     // not look trigger the agent to browse blueprints.
@@ -3008,7 +3038,7 @@ async function runAgentPass(
     systemPromptSlots = [
       SYSTEM_PROMPT,
       (standardFormats ? `${standardFormats}\n\n` : "") +
-          `${systemPromptWorkspace}${systemPromptConnections}` +
+          `${savedWorkspace ?? systemPromptWorkspace}${systemPromptConnections}` +
           (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
     ];
   }
@@ -3080,6 +3110,7 @@ async function runAgentPass(
           chatId,
           compactedTo,
           summary,
+          workspacePrompt: systemPromptWorkspace,
           ...buildCompactionState(
               chatMessages,
               compactedTo,
@@ -3819,6 +3850,44 @@ async function runAgentPass(
             claimedNames.add(input.bindingName);
           }
           return toolResult(result.message, { output: result.message });
+        } catch (error) {
+          toolCallNotes.set(toolCallId, { error: toolErrorText(error) });
+          throw error;
+        }
+      }
+    }),
+
+    createExternalResource: defineTool({
+      name: "createExternalResource",
+      label: "Create external resource",
+      description: CREATE_EXTERNAL_RESOURCE_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        vendorId: Type.String({
+          description: "Vendor id, as listed in the system prompt (e.g. 'google').",
+        }),
+        resourceUrlPattern: Type.String({
+          description: "urlPattern of a creatable resource type, from listConnectableResources.",
+        }),
+        title: Type.String({
+          description: "Title of the new resource, e.g. the document's title.",
+        }),
+        bindingName: Type.String({
+          description:
+              "Name under which the new resource appears in your env. Must be a JavaScript " +
+              "identifier not already in use; style: ALL_CAPS_WITH_UNDERSCORES.",
+        }),
+      }),
+      execute: async (toolCallId, input) => {
+        try {
+          validateBindingName(input.bindingName);
+          if (isNameInScope(input.bindingName)) {
+            throw new Error(`There is already a binding named "${input.bindingName}" in your ` +
+                `env. Choose a different name.`);
+          }
+          let output = await hooks.createExternalResource(chatId, input);
+          chatBindings.set(input.bindingName, {type: "workpiece", id: output.gatekeeperId});
+          // Recorded so replay can re-bind without creating again (see the replay path above).
+          return toolResult(jsonToolResultText(output), {output} as Partial<AiToolCall>);
         } catch (error) {
           toolCallNotes.set(toolCallId, { error: toolErrorText(error) });
           throw error;

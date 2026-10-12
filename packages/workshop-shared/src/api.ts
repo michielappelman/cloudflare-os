@@ -459,10 +459,28 @@ export type UserDirectoryRecord = {
   name: string;
 };
 
+/** Routing identity and one-use proof posted by the authenticated browser to redeem a transfer. */
+export type DeviceSessionHandoffStart = {
+  /** Durable Object identifier for the staging user; this value is not secret. */
+  userDoId: string;
+  /** Single-use 256-bit secret in lowercase hex; only its hash is stored server-side. */
+  ticket: string;
+};
+
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
+
+  /**
+   * Stage a two-minute, single-use device-session transfer for a native app. The state is an
+   * opaque 16–512 character URL-safe value and the key is an uncompressed P-256 public key encoded
+   * as unpadded base64url. The encrypted credential remains server-side until the browser POSTs
+   * the returned ticket to `/api/device-session/callback`, which redirects to the fixed, claimed
+   * HTTPS app link. Repeating a live state reissues its ticket and invalidates the previous one.
+   */
+  beginDeviceSessionHandoff(publicKey: string, state: string)
+    : Promise<DeviceSessionHandoffStart>;
 
   /** Set the user's own display name, seen in chats, etc. */
   setOwnDisplayName(name: string): Promise<void>;
@@ -2357,6 +2375,13 @@ export type ActionLogEntry = {
    * clicking Approve. Only ever set alongside state "approved" (there is no automatic rejection).
    */
   autoApproved?: boolean;
+
+  /**
+   * True for the creation queued by createExternalResource. Approving it requires one of the
+   * approver's accounts for the gatekeeper's vendor (see GatekeeperClient.getCreationSpec()), in
+   * which the resource is created.
+   */
+  creation?: true;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -2687,9 +2712,10 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Approve an action that is currently in the "pending" state. The action will be performed on
-   * approval.
+   * approval. Approving a creation (see ActionLogEntry.creation) requires `accountId`: the
+   * approver's connected account, for the gatekeeper's vendor, in which the resource is created.
    */
-  approveAction(id: number): Promise<void>;
+  approveAction(id: number, accountId?: number): Promise<void>;
 
   /**
    * Reject an action that is in the "pending" state. This notifies the gatekeeper that it will not
@@ -4283,6 +4309,28 @@ export type AiToolCall = {
     bindingName?: string;
   };
   output?: string;
+} | {
+  /**
+   * Create a new external resource of a creatable type (see `SupportedResource.creatable`). Its
+   * binding is usable at once: the gatekeeper simulates the resource until a user approves the
+   * creation action, choosing the account to create it in.
+   */
+  toolName: "createExternalResource";
+  input: {
+    vendorId: string;
+
+    /** `urlPattern` of the creatable resource type. */
+    resourceUrlPattern: string;
+
+    /** Title of the new resource, e.g. a document's title. */
+    title: string;
+
+    /** Name under which the resource appears in the chat's env (see validateBindingName()). */
+    bindingName: string;
+  };
+
+  /** The new gatekeeper workpiece; replay re-binds it rather than creating again. */
+  output?: {gatekeeperId: WorkpieceId};
 });
 
 // TODO: Extend AiToolCall for code-mode tool calls.
@@ -4953,7 +5001,7 @@ export type PreApprovableAction = {
 export type GatekeeperCreationSpec = {
   type: "gatekeeper";
   vendorId: string;        // identifies the gatekeeper adapter (e.g. "google")
-  resourceUrl: string;
+  resourceUrl?: string;    // absent until a resource created by createExternalResource exists
   typeUrlPattern: string;  // URL pattern from the vendor's SupportedResource (not the specific URL)
 } | {
   type: "aiModel";

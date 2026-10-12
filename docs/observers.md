@@ -436,7 +436,7 @@ gadget-minted children alike:
   design already tolerates for sessions the reset is about to sever. The per-turn-lease fix
   above (re-run `authorizeCollaborator` on resume, cancel on denial) closes this variant too.
 
-Four events trigger it:
+Five events trigger it:
 
 | Event | What grows |
 |---|---|
@@ -444,6 +444,7 @@ Four events trigger it:
 | `bindWorkpiece()` for a permanent (non-`chatId`) edge onto a vendor-backed connection — or onto a legacy (pre-`creationSpec`) one, which nobody *can* be verified against, so it restarts and quarantines and fresh `use` opens then fail closed on the reconnect-required error | **use** scope — the gadget UI a `use` session drives can now invoke it |
 | A merge that promotes a pending gadget or a pending binding edge into `use` scope | **use** scope, same reason |
 | `enableHook` on a vendor-backed connection not already in `use` scope | **use** scope — the hook delivers the connection's data into a gadget a `use` session can open (a hook waking a still-provisional gadget stays out of `use` scope until promotion; the merge diff reports that widening) |
+| Approving a creation queued by the agent's `createExternalResource` | every role's scope — the connection was published without a restart because until now it only simulated its resource, so nobody was verified against the real one. The restart is unconditional on role, since the connection may already be bound |
 
 The two roles widen independently, so each trigger passes the role it grew and the restart is
 skipped when no collaborator holds it: a new connection is in every `build` collaborator's scope
@@ -846,6 +847,9 @@ its resource types.
 | **confluence** | Page / Blog Post | **C** | Verify bound-content access; track observed child pages because they may have stricter restrictions than their parent. |
 | **zoominfo** | Account | **A** | Always throw. The whole-account binding exposes licensed, entitlement-dependent and account-specific intelligence, and ZoomInfo provides no ACL oracle proving another account can read every historical result. |
 | **context** | Context Library singleton | **C** | Track observed collections; verify each is public in the sharing domain or privately owned by the observer's Context account. |
+| **x** | Account | **C** | Admit any observer with a working X connection: public posts, profiles, public Lists and follow graphs need only an X account. Reads private to the account -- bookmarks, likes, mute state, private Lists, and any page holding a protected account's post -- authorize against one synthetic `owner` collection, which admits only an observer connected as the same X user. |
+| **x** | Post / List | **C** | As Account, plus a check on every open that the observer's own X account can see the bound post or List (`canViewPost` / `canViewList`). Each check is a read billed to the observer's connection, so a passed check is trusted for an hour; a failed one never is. |
+| **x** | Profile | **C** | As Account: a public profile needs only an X account, and the `owner` collection covers a protected user's posts. Accepted over-permissiveness for every X binding: an author who has blocked the observer is still readable through the gadget, since checking each author per observer per read would cost a read each and what leaks is public. |
 
 ### 9.3 The "broad binding" lens
 

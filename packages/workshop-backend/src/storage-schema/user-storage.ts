@@ -11,6 +11,7 @@ import type {
 } from "@gadgets/workshop-shared/api";
 import type { AccountDescription, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import type { VapidKeys } from "../web-push.js";
+import type { DeviceSessionHandoff } from "../auth/device-session-handoff.js";
 
 export type ConnectedAccountRecord = {
   id: number;
@@ -61,10 +62,28 @@ export type UserAiModelRecord = {
   config: AiModelConfig;
 }
 
-type LoginSessionRecord = {
+export type LoginSessionRecord = {
   tokenId: string,  // sha256 hash of token, hex-formatted
   created: Date,
+  /** Device sessions expire server-side; legacy browser sessions have no expiry. */
+  expiresAt?: Date,
+  /** A staged device session cannot authenticate until its handoff is consumed. */
+  pendingUntil?: Date,
 }
+
+/**
+ * A device-session transfer staged by an authenticated browser. Keyed by a hash of the native
+ * app's opaque state, idempotent for that state, single-use, and swept after `expiresAt`.
+ */
+export type PendingDeviceHandoffRecord = {
+  stateHash: string;
+  ticketHash: string;
+  publicKey: string;
+  handoff: DeviceSessionHandoff;
+  expiresAt: Date;
+  /** Password/gatekeeper mode only: activated on consumption, deleted on abandoned expiry. */
+  sessionTokenId?: string;
+};
 
 /** Blueprint record stored in the user's `blueprints` collection. */
 export type BlueprintUserRecord = {
@@ -146,6 +165,9 @@ export function makeUserStorage(storage: DurableObjectStorage) {
       }),
       pendingConnectFlows: collection<PendingConnectFlow>()({
         primaryKey: "nonceHash",
+      }),
+      pendingDeviceHandoffs: collection<PendingDeviceHandoffRecord>()({
+        primaryKey: "stateHash",
       }),
       blueprints: collection<BlueprintUserRecord>()({
         primaryKey: "id",
