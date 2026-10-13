@@ -2,8 +2,7 @@ import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPinRecord, MainlineMergeGadget, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, BlueprintMerge, ApplyBlueprintResult, GadgetUpstream, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, IN_VIEW_REPORT_TTL_MS } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange,
-
-  transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
+  MAX_CODE_CHANGE_SIZE, transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import { type AgentCatalog, Gatekeeper, GatekeeperUserVerifier, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -45,7 +44,7 @@ import {
   getAiGatewayLogCost,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, CHAT_CHANGE_MESSAGE_BUDGET, SeedBindingInfo, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
+import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
 import { GitImpl } from "./git-binding";
 import { scanWorkpieceForGrep, type GrepScan } from "./grep";
@@ -421,7 +420,7 @@ const CHAT_CHANGE_AUTHOR_SPLIT_MS = 60_000;
 // so a long editing session can't grow the window (and its subscribe-replay cost) without bound.
 // The job is compacting keystroke-granularity ops into few large composed ops -- rows arrive
 // per edit burst, so this is sized in "a screenful of typing", not lines. Byte growth is
-// bounded separately (CHAT_CHANGE_MESSAGE_BUDGET, enforced at row-append time). Thanks to the
+// bounded separately (MAX_CODE_CHANGE_SIZE, enforced at row-append time). Thanks to the
 // retired-row grace window this stales nobody: a submission based inside the materialized range
 // still transforms over the retired rows.
 const CHAT_CHANGE_MATERIALIZE_THRESHOLD = 1000;
@@ -446,14 +445,12 @@ const AGENT_KEEPALIVE_ALARM_MS = 60_000;
 // OverseerImpl.restartIfLoopLimited.
 const LOOP_LIMIT_RESTART_MIN_AGE_MS = 60_000;
 
-// The error refusing a merge for the files it could not hold (see MergeResult.tooLargePaths),
-// named as the user knows them. `ownChanges` is the side the user can undo, as in "this chat's
-// changes to it": with those gone, only the other side has changed the file, and it is taken
-// whole.
-function tooLargeToMergeError(paths: string[], ownChanges: string): Error {
-  return new Error(`Cannot merge ${paths.map(path => JSON.stringify(path)).join(", ")}: both ` +
-      `sides changed it, and it is too large to merge. Make the file smaller, or undo ` +
-      `${ownChanges}, after which only one side has changed it.`);
+// The error an accept throws when writing a workpiece's commit fails (most likely because
+// storage refused a file too large to hold, which the git store's error names), prefixed with
+// the workpiece as the user knows it. An accept writes its objects before it moves anything, so
+// the chat keeps its changes and can be accepted again once the cause is fixed.
+function acceptWriteError(workpiece: string, err: unknown): Error {
+  return new Error(`Cannot accept changes to ${workpiece}: ${stringifyError(err)}`, {cause: err});
 }
 
 // Safely convert an unknown thrown value to a human-readable string.
@@ -2613,8 +2610,8 @@ class OverseerImpl implements AgentHooks {
   //
   // One message, always: the composition is kept storable by bounding what accumulates
   // (submitCodeChange materializes the pending window before a row would push its summed size
-  // past CHAT_CHANGE_MESSAGE_BUDGET; the agent's step buffer is bounded by STEP_CHANGE_BUDGET
-  // at the write call -- both declared in agent.ts), never by splitting the output --
+  // past MAX_CODE_CHANGE_SIZE; the agent's step buffer is bounded by the same cap at the write
+  // call), never by splitting the output --
   // splitting would scatter one batch's extras and edits across messages a suffix revert could
   // divide, and would break the agent's message-counting change-ID numbering.
   //
@@ -3252,16 +3249,19 @@ class OverseerImpl implements AgentHooks {
     //  - Attribution: the newest live rows belong to a different author who has gone idle, and
     //    one message must never blend two authors' sessions. (Two authors typing *concurrently*
     //    still share a batch, attributed to "Multiple Authors".)
-    //  - Byte budget: this row would push the window's summed change size past what one
-    //    "changes" message may compose (materialization writes exactly one message, so the
-    //    bound is enforced here, where rows accumulate). A row bigger than the whole budget
-    //    thus always lands in an empty window and later travels alone in one oversized message.
+    //  - Size: this row would push the window's summed change size past what one "changes"
+    //    message may compose (materialization writes exactly one message, so the bound is
+    //    enforced here, where rows accumulate; an unstorable message would wedge
+    //    materialization, which retries the same compose until it succeeds). A row that alone
+    //    exceeds the cap -- transformation can grow a validated change slightly -- lands in an
+    //    empty window and travels alone, in a message storage proved it can hold when the row
+    //    itself was written.
     let latest = this.#newestLiveChatChange(chatId, codeBase.generation);
     let authorSplit = latest !== undefined && !this.sameChatAuthor(latest.author, author) &&
         Date.now() - latest.timestamp.getTime() > CHAT_CHANGE_AUTHOR_SPLIT_MS;
     let window = this.#liveWindowSummary(chatId, codeBase);
     let byteSplit = window.count > 0 &&
-        window.bytes + codeChangeSerializedSize(transformed) > CHAT_CHANGE_MESSAGE_BUDGET;
+        window.bytes + codeChangeSerializedSize(transformed) > MAX_CODE_CHANGE_SIZE;
     if (authorSplit || byteSplit) {
       this.materializeChatChanges(chatId, meta);
       meta = this.getChatMetaOrThrow(chatId);
@@ -3353,8 +3353,7 @@ class OverseerImpl implements AgentHooks {
     // Merge each stale gadget: the mainline commit the chat last merged (the pin's
     // `mergedCommit`) is the base -- explicitly known, so no merge-base discovery -- the head is
     // one side and the chat's files the other. Conflicting hunks keep inline diff3 markers for
-    // the user (or their agent) to clean up. Every merge is computed before anything is written,
-    // so a refused one leaves no trace.
+    // the user (or their agent) to clean up. Every merge is computed before anything is written.
     let content = await this.getCurrentChatContent(chatId, meta);
     let merges: {pin: ChatGadgetPinState, head: string, bindingName: string,
                  chatFiles: Map<string, string>, mainlineFiles: Map<string, string>,
@@ -3365,11 +3364,6 @@ class OverseerImpl implements AgentHooks {
       let chatFiles = content.get(pin.gadgetId) ?? new Map<string, string>();
       let result = threeWayMerge(base, mainlineFiles, chatFiles,
           {base: "merged base", ours: "mainline", theirs: "this chat"});
-      if (result.tooLargePaths.length > 0) {
-        throw tooLargeToMergeError(
-            result.tooLargePaths.map(path => `${record.bindingName}/${path}`),
-            "this chat's changes to it");
-      }
       merges.push({pin, head: record.commitId!, bindingName: record.bindingName, chatFiles,
                    mainlineFiles, result});
     }
@@ -3506,9 +3500,6 @@ class OverseerImpl implements AgentHooks {
       let theirs = await this.gitStore.readCommitFiles(release);
       let result = threeWayMerge(base.files, ours, theirs,
           {base: "base", ours: "this gadget", theirs: "blueprint"});
-      if (result.tooLargePaths.length > 0) {
-        throw tooLargeToMergeError(result.tooLargePaths, "the gadget's own changes to it");
-      }
 
       // The kind is the merge's result: a "follow" if the gadget already had every change the
       // release made, and a "fastForward" if the gadget had none of its own to keep. A conflict
@@ -3863,16 +3854,19 @@ class OverseerImpl implements AgentHooks {
         }
         parents.push(release);
       }
-      commits.push({
-        gadgetId: record.id,
-        commitId: await this.gitStore.writeFilesAsCommit(files, {
+      let commitId: string;
+      try {
+        commitId = await this.gitStore.writeFilesAsCommit(files, {
           parents,
           author: identity,
           message: `Accept changes from chat: ${meta.title}`,
           timestamp: new Date(),
           headers: release !== undefined ? [releaseMergeHeader(release)] : undefined,
-        }),
-      });
+        });
+      } catch (err) {
+        throw acceptWriteError(record.bindingName, err);
+      }
+      commits.push({gadgetId: record.id, commitId});
     }
 
     // Plan the worktree accepts: the commit each pinned worktree's accepted commit
@@ -3902,7 +3896,12 @@ class OverseerImpl implements AgentHooks {
           let files = chatContent.get(pin.gadgetId);
           let changes = new Map<string, string | null>();
           for (let path of touched) changes.set(path, files?.get(path) ?? null);
-          let flattened = await this.gitStore.writeChangedTree(record.pinBase, changes);
+          let flattened: string;
+          try {
+            flattened = await this.gitStore.writeChangedTree(record.pinBase, changes);
+          } catch (err) {
+            throw acceptWriteError(record.title, err);
+          }
           if (flattened !== await this.gitStore.commitTree(record.pinBase)) {
             newPinBase = flattened === await this.gitStore.commitTree(record.headCommit)
                 ? record.headCommit

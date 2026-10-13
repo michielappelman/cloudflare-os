@@ -43,16 +43,15 @@ export const GOOGLE_DOC_RESOURCE: SupportedResource = {
 };
 
 /**
- * A single Google Sheet.
- *
- * Requests the read-write `spreadsheets` scope although reads are all it offers on an existing
- * spreadsheet: creating one (see GatekeeperVendor.createResource()) needs it, since Google's
- * `spreadsheets.create` accepts no read-only scope.
+ * A single Google Sheet, read and edited with the read-write `spreadsheets` scope, which creating one
+ * (see GatekeeperVendor.createResource()) needs too.
  */
 export const GOOGLE_SHEETS_RESOURCE: SupportedResource = {
   urlPattern: "https://docs.google.com/spreadsheets/d/:spreadsheetId/*",
   title: "Google Spreadsheet",
-  description: "Read values from a spreadsheet you choose.",
+  description:
+    "Read the values and formatting of a spreadsheet you choose, and change its values, tabs, " +
+    "rows, columns, and formatting, with your approval.",
   grantable: true,
   creatable: true,
 };
