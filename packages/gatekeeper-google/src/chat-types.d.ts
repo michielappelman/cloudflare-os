@@ -164,12 +164,19 @@ export type ChatMessageInfo = {
   /** Who sent the message. */
   sender?: ChatUser;
   /**
-   * Message body in Google Chat's formatting syntax (see `ChatSpace.post()`). Committed mentions
-   * read back as `@Name`, with `mentions` listing who they refer to; a pending message keeps the
-   * `<users/{user}>` form you posted. Empty when the message has no text, such as an
-   * attachment-only message.
+   * Message body as plain text, as Google Chat displays it: a link reads as its label, with its
+   * URL dropped, and a committed mention as `@Name`, with `mentions` listing who it refers to. A
+   * pending message keeps the text you posted. Empty when the message has no text, such as an
+   * attachment-only message. Use `formattedText` for link URLs and formatting.
    */
   text: string;
+  /**
+   * Message body in Google Chat's formatting syntax (see `ChatSpace.post()`): links as
+   * `<https://example.com|label>`, mentions as `<users/{user}>`, and markup such as `*bold*`.
+   * Google may leave out some formatting its UI shows. Pass it to `ChatMessage.edit()` to change
+   * a message without losing its links or mentions.
+   */
+  formattedText: string;
   /** Users @mentioned in the message. Empty for a pending message until it is committed. */
   mentions: ChatUser[];
   /** When the message was created. */
@@ -366,12 +373,13 @@ export interface ChatSession extends RpcTarget {
    * chat with exactly them and you. Each person is `users/{user}` or an email address; leave
    * yourself out. At most 49 people. `text` is formatted as for `ChatSpace.post()`.
    *
-   * When that conversation already exists the message goes there. Otherwise sending also
-   * creates it, so each person must be named by email address and be in your organization's
-   * directory (see {@link searchPeople}): conversations with people outside your organization
-   * cannot be started this way. A group chat that also holds anyone else, Chat apps and Google
-   * Groups included, doesn't count, and if anyone joins it before the message is approved,
-   * nothing is posted.
+   * When that conversation already exists the message goes there. Otherwise sending also creates
+   * it. An email address must be in your organization's directory (see {@link searchPeople}); a
+   * known `users/{user}` ID can also start one because Google accepts IDs only for people in the
+   * same Workspace organization. Conversations with people outside your organization cannot be
+   * started this way. A group chat that also holds anyone else, Chat apps and Google Groups
+   * included, doesn't count, and if anyone joins it before the message is approved, nothing is
+   * posted.
    *
    * Until its conversation exists, a message that creates it has a temporary `spaceId`, and until
    * it is committed it can be edited but not replied to.
@@ -574,7 +582,9 @@ export interface ChatMessage extends RpcTarget {
 
   /**
    * Replace the text of one of your own messages, including one that is still pending. `text`
-   * uses the formatting described on `ChatSpace.post()`. Throws for anyone else's message.
+   * uses the formatting described on `ChatSpace.post()`; start from the message's
+   * `formattedText`, not its `text`, to keep its links and mentions. Throws for anyone else's
+   * message.
    */
   edit(text: string): Promise<void>;
 

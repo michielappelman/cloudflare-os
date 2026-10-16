@@ -13,13 +13,15 @@ import { DriveApi } from "./drive-api";
 import { unguardedNativeRead, type NativeRead } from "./drive-session";
 import type { GoogleVerifierApi } from "./google-verifier-types";
 import { Mutex } from "./mutex";
+import { explainUnopenedFile } from "./office-conversion";
 import { ReadGate } from "./read-gate";
 import { nativeFileUrl } from "./resources";
 import {
   batchKind, MARKER_RETENTION_MS, SHEETS_ACTIONS, type MarkerEntry,
 } from "./sheets-actions";
 import {
-  BlankSpreadsheet, GoogleSheetsApi, parseFormatRange, validateRanges, type SheetArea,
+  BlankSpreadsheet, GoogleSheetsApi, parseFormatRange, validateRanges,
+  type SheetArea,
   type SpreadsheetMetadata, type SpreadsheetReader,
 } from "./sheets-api";
 import type { BaseFormats } from "./sheets-format";
@@ -186,7 +188,10 @@ export class GoogleSheetsGatekeeperImpl
         tsType: "GoogleSpreadsheetSession",
       };
     }
-    let spreadsheet = await this.#api.getSpreadsheet(props.spreadsheetId);
+    let spreadsheet = await this.#api.getSpreadsheet(props.spreadsheetId).catch(async (error: unknown) => {
+      throw await explainUnopenedFile(
+        "sheets", error, async () => (await this.#drive.getFile(props.spreadsheetId)).mimeType);
+    });
     return {
       url: nativeFileUrl("sheets", props.spreadsheetId),
       title: spreadsheet.title,

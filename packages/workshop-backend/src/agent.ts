@@ -1,14 +1,16 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AiChatStreamEvent, BlueprintBinding, BlueprintMerge, BlueprintOutput, ChatGadgetPin, ChatGadgetPinRecord, MainlineMergeGadget, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
-import { applyCodeChange, codeChangeSerializedSize, MAX_CODE_CHANGE_SIZE, replaceSpanChange,
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AiChatStreamEvent, AlwaysAvailableResource, BlueprintBinding, BlueprintMerge, BlueprintOutput, ChatGadgetPin, ChatGadgetPinRecord, MainlineMergeGadget, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { applyCodeChange, codeChangeSerializedSize, MAX_CODE_CHANGE_SIZE, replaceSpanChange, validateCodeChangeSchema,
   type CodeContent, type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
-import { createWorkshopLogger } from "./observability";
+import { createWorkshopLogger, obsContext } from "./observability";
+import { createTracer } from "@gadgets/observability/tracing";
 import {
   Type, getSystemMessageText, isRetryableAssistantError, toToolDeclaration,
 } from "@earendil-works/pi-ai";
 import type {
-  AssistantMessage, ImageContent, Message, SystemMessage, TSchema, TextContent, ToolCall, Usage,
+  AssistantMessage, ImageContent, Message, SystemMessage, TSchema, TextContent, ToolCall,
+  ToolResultMessage, Usage,
 } from "@earendil-works/pi-ai";
 import {
   runAgentLoopContinue, type AgentContext, type AgentEvent, type AgentTool,
@@ -16,7 +18,10 @@ import {
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
-import { formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
+import {
+  findCatalogChanges, formatAlwaysAvailableResourcesPrompt, formatCatalogChange,
+  seenAlwaysAvailableResources,
+} from "./agent-catalog";
 import { formatInstanceInstructions } from "./admin-config";
 import type { AiGatewayLogRoute } from "./ai-gateway";
 import type { SpawnCallableOptions } from "./agent-spawner-binding";
@@ -37,6 +42,19 @@ import {
 import { formatGrep, type GrepScan } from "./grep";
 
 const logger = createWorkshopLogger("workshop.agent");
+const traced = createTracer(obsContext.get);
+
+/** Content-free counters for rejected transforms; diagnostics must contain no paths or text. */
+export function agentCodeChangeShape(change: CodeChange) {
+  const shape = {changeWorkpieceCount: Object.keys(change).length, changeFileCount: 0, changeEmptyPathCount: 0};
+  for (const entries of Object.values(change)) if (Array.isArray(entries)) {
+    for (const entry of entries) if (Array.isArray(entry)) {
+      ++shape.changeFileCount;
+      if (entry[0] === "") ++shape.changeEmptyPathCount;
+    }
+  }
+  return shape;
+}
 
 /**
  * How much text one tool result may put in front of the model. About 8k tokens: a handful of
@@ -151,6 +169,12 @@ export type SeedBindingInfo = {
   catalog?: AgentCatalog | null;
 };
 
+/** The always-available entries of a chat's seed binding layer. */
+export function alwaysAvailableResources(seeds: SeedBindingInfo[]): AlwaysAvailableResource[] {
+  return seeds.flatMap(({name, title, catalog}) =>
+      catalog === undefined ? [] : [{name, title, catalog}]);
+}
+
 /**
  * The history one agent pass replays: the active compaction checkpoint, if any, the chat log from
  * it on, and the token total the provider reported for the chat's last model step (zero when none
@@ -170,6 +194,11 @@ type AgentPassOutcome =
   | {type: "reloadForCompaction"}
   | {type: "compacted"; checkpoint: CompactionCheckpoint}
   | {type: "transientFailure"; error: AgentTurnError};
+
+type AgentProgress = {
+  executionId: string;
+  barrierSequence: number;
+};
 
 /**
  * Summary of one of the workspace's gadgets, as needed by the agent: identity and its named
@@ -271,6 +300,13 @@ export interface AgentHooks {
 
   /** Records the chat's AiChatAgentContext.workspacePrompt. */
   setChatWorkspacePrompt(chatId: number, workspacePrompt: string): void;
+
+  /** The sequence the chat's next message will get. */
+  nextChatSequencePeek(chatId: number): number;
+
+  /** Appends messages to the chat log, unless the chat has been deleted. */
+  addChatMessages(chatId: number, author: AiChatAuthorInfo,
+      msgs: AiChatMessageBodyWithModelData[]): void;
 
   /**
    * The step's persistence barrier: in one storage transaction, persist the step's chat
@@ -1392,6 +1428,29 @@ function makeReplayAssistantMessage(
   };
 }
 
+// Builds the synthetic observeUserChanges call and result that tell the model about something
+// outside its own tool calls (the user's edits, a revert, a catalog change), keyed by the chat
+// message that records it. The result is plain text, not JSON: a JSON-escaped diff full of quotes
+// and braces would be needlessly hard to read, and the result is only ever fed to the model.
+function makeReplayObservation(
+    sequence: number, text: string, model: ModelHandle["model"], timestamp: number)
+    : [AssistantMessage, ToolResultMessage] {
+  let toolCallId = `synthetic_${sequence}`;
+  return [
+    makeReplayAssistantMessage(
+        [{type: "toolCall", id: toolCallId, name: "observeUserChanges", arguments: {}}],
+        model, timestamp),
+    {
+      role: "toolResult",
+      toolCallId,
+      toolName: "observeUserChanges",
+      content: [{type: "text", text}],
+      isError: false,
+      timestamp,
+    },
+  ];
+}
+
 // Builds an AgentTool while keeping `execute`'s params typed by its TypeBox schema; the cast to
 // the untyped AgentTool erases the parameter type (pi validates tool-call arguments against the
 // schema before calling execute, so the runtime types are guaranteed).
@@ -1419,11 +1478,16 @@ export async function runAgent(
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
     modelConfig: AiModelConfig): Promise<void> {
+  // Provider retries and compaction reloads are passes of this execution, not new executions.
+  const progress: AgentProgress = {
+    executionId: crypto.randomUUID(),
+    barrierSequence: 0,
+  };
   let retries = 0;
   while (true) {
     let history = hooks.loadChatHistory(chatId);
     let outcome = await runAgentPass(
-        hooks, handle, chatId, author, history, abortSignal, initiator, modelConfig);
+        hooks, handle, chatId, author, history, abortSignal, initiator, modelConfig, progress);
     if (outcome.type === "transientFailure") {
       if (++retries > TRANSIENT_FAILURE_RETRIES) throw outcome.error;
       // The failed request persisted nothing, so the retry starts from the last saved step. What
@@ -1445,7 +1509,9 @@ async function runAgentPass(
     {checkpoint, chatMessages, measuredTokens}: ChatHistory,
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
-    modelConfig: AiModelConfig): Promise<AgentPassOutcome> {
+    modelConfig: AiModelConfig,
+    progress: AgentProgress): Promise<AgentPassOutcome> {
+  const progressLogger = logger.with({chatId, executionId: progress.executionId});
 
   // The workspace's gadget registry, snapshotted at the start of the turn (gadgets provisional
   // to other chats are excluded -- they belong to those chats' proposed changes). This is the
@@ -1732,7 +1798,7 @@ async function runAgentPass(
   // changed (see applyReplayedPin). The one way knowledge goes stale is another chat's accept
   // moving an unpinned gadget's head, and a stamp is checked against the head at
   // the two points where it would otherwise be trusted: editFile's gate on an unpinned gadget,
-  // and the establishment of a pin (anchorKnowledgeToPin), after which reads are session-served
+  // and the establishment of a pin (knowledgeAtPin), after which reads are session-served
   // and the gate is skipped. At an epoch boundary session-tracking entries take an oid stamp of
   // their own (resetSessionEpoch). Deliberately not carried across a compaction boundary: a
   // read the summary swallowed no longer tells the agent what the text is, so re-reading is
@@ -1754,10 +1820,12 @@ async function runAgentPass(
   // pin at the same commit); idempotent, since a second call finds nothing stamped. Worktrees
   // need none of this: only this chat's accept moves the commit an unpinned worktree reads at,
   // and stamps carried across that accept are of content it committed, so a worktree's stamps
-  // always match its pin base.
-  let anchorKnowledgeToPin = async (gadgetId: WorkpieceId, baseCommit: string) => {
+  // always match its pin base. Prepare a copy: live tools install it only after the edit
+  // buffers successfully, so a rejected or no-op edit cannot settle reads without a pin.
+  let knowledgeAtPin = async (gadgetId: WorkpieceId, baseCommit: string) => {
     let files = filesRead.get(gadgetId);
     if (files === undefined) return;
+    files = new Map(files);
     for (let [filename, stamp] of files) {
       if (stamp === undefined) continue;
       if (await hooks.fileOidAtCommit(baseCommit, filename) === stamp) {
@@ -1766,6 +1834,7 @@ async function runAgentPass(
         files.delete(filename);
       }
     }
+    return files;
   };
 
   // Resolve a file tool's optional `workpiece` parameter -- the chat binding name of the target
@@ -1835,7 +1904,7 @@ async function runAgentPass(
   // editFile forces a re-read.
   //
   // A stamped entry normally carries over untouched: its workpiece was unpinned (a pinned
-  // gadget's stamps were settled by anchorKnowledgeToPin), so the session holds nothing of the
+  // gadget's stamps were settled by knowledgeAtPin), so the session holds nothing of the
   // file and the stamp is as true after the accept as before. The exception is a worktree,
   // whose stamps are never settled at its pin: a *user* edit of a file the model read unpinned
   // lands in the session content while the entry keeps the pre-edit stamp (the model's own
@@ -1900,7 +1969,8 @@ async function runAgentPass(
     sessionContent = new Map(sessionContent);
     sessionContent.set(pin.gadgetId, files);
     pinnedGadgets.add(pin.gadgetId);
-    await anchorKnowledgeToPin(pin.gadgetId, pin.baseCommit);
+    let knowledge = await knowledgeAtPin(pin.gadgetId, pin.baseCommit);
+    if (knowledge !== undefined) filesRead.set(pin.gadgetId, knowledge);
     return forgotten.toSorted();
   };
 
@@ -1979,8 +2049,9 @@ async function runAgentPass(
 
   // Load the chat's seed binding layer (lazily seeding/naming as needed -- this call is also the
   // chokepoint that stamps binding names onto persisted messages that lack them, which the replay
-  // below relies on). The seed is frozen per chat, so the prompt content derived from it stays in
-  // the cacheable prefix; chat-local bindings accumulate on top during replay.
+  // below relies on). The seed grows only by the always-available resources the chat gains, which
+  // the prompt doesn't list (see below), so the prompt content derived from it stays in the
+  // cacheable prefix; chat-local bindings accumulate on top during replay.
   let seedBindings = await hooks.prepareChatBindings(chatId, chatMessages);
   for (let seed of seedBindings) {
     if (!chatBindings.has(seed.name)) {
@@ -2000,12 +2071,27 @@ async function runAgentPass(
 
   // Always-available resources (e.g. the Context Library) describe the agent's environment, so
   // they're announced in the system prompt (slot 1, below) alongside the bindings list rather
-  // than as a synthetic user turn.
-  let alwaysAvailable = seedBindings.filter(seed => seed.catalog !== undefined);
+  // than as a synthetic user turn. The prompt lists them as this part of the chat first saw them,
+  // so it stays the same when a catalog changes or the chat gains a resource; the model is told
+  // instead (see AiChatAgentContext.alwaysAvailableResources). One the chat can no longer reach
+  // drops out.
+  let currentResources = alwaysAvailableResources(seedBindings);
+  let listedResources = checkpoint?.alwaysAvailableResources ??
+      agentContext.alwaysAvailableResources ?? currentResources;
+  let alwaysAvailable = listedResources.filter(listed =>
+      currentResources.some(current => current.name === listed.name));
   let alwaysAvailableResourcesPrompt = alwaysAvailable.length > 0
-      ? formatAlwaysAvailableResourcesPrompt(alwaysAvailable.map(seed =>
-          ({title: seed.title, name: seed.name, catalog: seed.catalog!})))
-      : "";
+      ? formatAlwaysAvailableResourcesPrompt(alwaysAvailable) : "";
+
+  // Tells the model what changed in each resource since it last saw it (see the "catalogChange"
+  // message).
+  let replayCatalogChange = (
+      sequence: number, resources: AlwaysAvailableResource[], timestamp: number) => {
+    let seen = seenAlwaysAvailableResources(listedResources, chatMessages, sequence);
+    let text = resources.map(resource => formatCatalogChange(resource, seen.get(resource.name)))
+        .join("\n\n");
+    modelMessages.push(...makeReplayObservation(sequence, text, handle.model, timestamp));
+  };
 
   // Rebuild the code the compacted prefix left behind: first the checkpoint's pins establish
   // their base trees, then the composed proposed change applies on top. (A pre-conversion
@@ -2540,23 +2626,8 @@ async function runAgentPass(
                   "available; read the files to see their current content.)");
             }
             if (observations.length > 0) {
-              let toolCallId = `synthetic_${msg.sequence}`;
-              modelMessages.push(makeReplayAssistantMessage([{
-                type: "toolCall",
-                id: toolCallId,
-                name: "observeUserChanges",
-                arguments: {},
-              }], handle.model, msgTimestamp));
-              modelMessages.push({
-                role: "toolResult",
-                toolCallId,
-                toolName: "observeUserChanges",
-                // Plain text, not JSON: a JSON-escaped diff full of quotes and braces would be
-                // needlessly hard to read, and the result is only ever fed to the model.
-                content: [{type: "text", text: observations.join("\n\n")}],
-                isError: false,
-                timestamp: msgTimestamp,
-              });
+              modelMessages.push(...makeReplayObservation(
+                  msg.sequence, observations.join("\n\n"), handle.model, msgTimestamp));
             }
           }
         }
@@ -2593,14 +2664,6 @@ async function runAgentPass(
         break;
 
       case "revert": {
-        // Synthetic message.
-        let toolCallId = `synthetic_${msg.sequence}`;
-        modelMessages.push(makeReplayAssistantMessage([{
-          type: "toolCall",
-          id: toolCallId,
-          name: "observeUserChanges",
-          arguments: {},
-        }], handle.model, msgTimestamp));
         // Name the first change the revert discarded: the earliest batch still proposed when it
         // was recorded. A revert reaching into the summarized turns can't be named that way, since
         // the batches it may have discarded there aren't replayed.
@@ -2609,23 +2672,16 @@ async function runAgentPass(
             : foldProposedChanges(chatMessages.slice(0, msgIndex))
                 .find(batch => batch.sequence >= msg.revertFrom);
         let revertedFromChangeId = firstReverted && changeIdMap.get(firstReverted.sequence);
-        modelMessages.push({
-          role: "toolResult",
-          toolCallId,
-          toolName: "observeUserChanges",
-          content: [{
-            type: "text",
-            text: revertsSummarizedTurns
+        modelMessages.push(...makeReplayObservation(
+            msg.sequence,
+            revertsSummarizedTurns
                 ? "The user reverted all pending changes from a point in the summarized " +
                   "earlier turns onward."
                 : revertedFromChangeId === undefined ? "The user discarded pending changes."
                 : `The user reverted all changes starting from change ${revertedFromChangeId} ` +
                   `onward. The files have returned to the state they were in immediately ` +
                   `before change ${revertedFromChangeId}.`,
-          }],
-          isError: false,
-          timestamp: msgTimestamp,
-        });
+            handle.model, msgTimestamp));
         break;
       }
 
@@ -2713,6 +2769,10 @@ async function runAgentPass(
         break;
       }
 
+      case "catalogChange":
+        replayCatalogChange(msg.sequence, msg.resources, msgTimestamp);
+        break;
+
       case "action":
       case "useGadget":
       case "error":
@@ -2771,6 +2831,24 @@ async function runAgentPass(
   // barrier persists the action before the loop ends and waits for approval to resume it.
   let awaitingActionDecision = false;
 
+  // JavaScript clocks can be frozen through synchronous SQL/apply work in production. Let the
+  // runtime span own timing; the logs identify phase/order, not a duration or a disk-flush ACK.
+  let persistStep = <T>(operation: () => Promise<T>): Promise<T> => traced("agent.step.persist", async span => {
+    const sequence = ++progress.barrierSequence;
+    span.setAttribute("chatId", chatId);
+    span.setAttribute("executionId", progress.executionId);
+    span.setAttribute("sequence", sequence);
+    progressLogger.debug("agent persistence started", {event: "agent.step.persist.started", sequence});
+    try {
+      const result = await operation();
+      progressLogger.debug("agent persistence completed", {event: "agent.step.persist.completed", sequence});
+      return result;
+    } catch (error) {
+      progressLogger.debug("agent persistence failed", {event: "agent.step.persist.failed", sequence});
+      throw error;
+    }
+  });
+
   // Buffer one file edit into the step and apply it to the session content; it becomes durable
   // (row + broadcast) only at the step's persistence barrier. The first write to an unpinned
   // gadget with committed code pins it at the given head -- always the current head, never the
@@ -2784,6 +2862,13 @@ async function runAgentPass(
   let appendAgentEdit = (
       workpieceId: WorkpieceId, change: CodeChange,
       pin?: {baseCommit: string, baseFiles: Map<string, string>}) => {
+    try { validateCodeChangeSchema(change); }
+    catch (error) {
+      logger.warn("invalid agent transform rejected before buffering", {
+        event: "agent.step.change.invalid", chatId, changeStage: "buffer", ...agentCodeChangeShape(change),
+      });
+      throw error;
+    }
     // Bound the step's total: the barrier writes the buffer as exactly one "changes" message,
     // which must fit in one storage record, or the step's edits would be lost. Composition never
     // exceeds the sum of its inputs' sizes, so the summed size bounds the message's change.
@@ -3086,6 +3171,9 @@ async function runAgentPass(
           compactedTo,
           summary,
           workspacePrompt: systemPromptWorkspace,
+          alwaysAvailableResources: [
+            ...seenAlwaysAvailableResources(listedResources, chatMessages, compactedTo).values(),
+          ],
           ...buildCompactionState(
               chatMessages,
               compactedTo,
@@ -3238,7 +3326,7 @@ async function runAgentPass(
           // The first write to an unpinned gadget with committed code pins it at the current
           // head (a whole-file overwrite is coherent against any base, so no read gate here --
           // but the gadget's *other* stamped reads are settled against that head now, see
-          // anchorKnowledgeToPin). Gadgets with no committed code stay unpinned; their content
+          // knowledgeAtPin). Gadgets with no committed code stay unpinned; their content
           // builds up from changes. (A worktree's first-write pin needs no declaration;
           // appendAgentEdit handles it.)
           let pin: {baseCommit: string, baseFiles: Map<string, string>} | undefined;
@@ -3246,14 +3334,15 @@ async function runAgentPass(
             let head = hooks.getGadgetHead(resolved.workpieceId);
             if (head !== undefined) {
               pin = {baseCommit: head, baseFiles: await hooks.readCommitFiles(head)};
-              await anchorKnowledgeToPin(resolved.workpieceId, head);
             }
           }
 
+          let knowledge = pin && await knowledgeAtPin(resolved.workpieceId, pin.baseCommit);
           // A whole-file write is a `set`: valid against any state, so replay and concurrent
           // transforms can never mis-anchor it.
           appendAgentEdit(resolved.workpieceId,
               {[resolved.workpieceId]: [[filename, {set: newContent}]]}, pin);
+          if (knowledge !== undefined) filesRead.set(resolved.workpieceId, knowledge);
 
           // The agent knows exactly what's in the file, so add it to the `filesRead` set so
           // that it can make further edits without rewriting.
@@ -3322,8 +3411,6 @@ async function runAgentPass(
               }
               if (!hooks.isWorktree(resolved.workpieceId)) {
                 pin = {baseCommit: head, baseFiles: await hooks.readCommitFiles(head)};
-                // This file passed the gate; the gadget's other stamped reads are settled here.
-                await anchorKnowledgeToPin(resolved.workpieceId, head);
               }
             }
           }
@@ -3344,8 +3431,10 @@ async function runAgentPass(
           let pos = findEditPos(before, textToReplace);
           if (replacement !== textToReplace) {
             let edit = replaceSpanChange(before.length, pos, textToReplace, replacement);
+            let knowledge = pin && await knowledgeAtPin(resolved.workpieceId, pin.baseCommit);
             appendAgentEdit(
                 resolved.workpieceId, {[resolved.workpieceId]: [[filename, {edit}]]}, pin);
+            if (knowledge !== undefined) filesRead.set(resolved.workpieceId, knowledge);
             // Like writeFile: the agent knows the file's exact resulting content, so the entry
             // becomes session knowledge (the gadget is pinned now, so a commit stamp -- which
             // predates this edit -- would be the wrong thing to carry forward).
@@ -4074,27 +4163,29 @@ async function runAgentPass(
         // The barrier itself: one transaction persists the step's messages and its buffered
         // effects -- rows, the step's single "changes" message, retirement, registry stamps --
         // so the effects are durable iff the transcript that explains them is. The buffer is
-        // drained before the call: if the barrier throws, the turn dies with it (rethrown out
-        // of the loop), and re-delivering the step's changes anywhere would be wrong.
-        let stepChanges = stepBuffer.changes;
-        stepBuffer.changes = [];
-        stepBuffer.bytes = 0;
-        let createdGadgets = pendingCreatedGadgets;
-        pendingCreatedGadgets = [];
-        let createdWorktrees = pendingCreatedWorktrees;
-        pendingCreatedWorktrees = [];
-        let addedBindings = pendingAddedBindings;
-        pendingAddedBindings = [];
-        let worktreeCommits = pendingWorktreeCommits;
-        pendingWorktreeCommits = [];
-        let blueprintMerges = pendingBlueprintMerges;
-        pendingBlueprintMerges = [];
-        if (await hooks.commitAgentStep(chatId, author, msgs,
-            {changes: stepChanges, createdGadgets, createdWorktrees, addedBindings,
-             worktreeCommits, blueprintMerges},
-            message.usage, handle.lastResponse?.aiGatewayLogId, handle.aiGatewayLogRoute)) {
-          ++nextChangeId;
-        }
+        // drained before the call. If the barrier throws, the turn dies with it, and re-delivering
+        // the effects would be wrong.
+        await persistStep(async () => {
+          let stepChanges = stepBuffer.changes;
+          stepBuffer.changes = [];
+          stepBuffer.bytes = 0;
+          let createdGadgets = pendingCreatedGadgets;
+          pendingCreatedGadgets = [];
+          let createdWorktrees = pendingCreatedWorktrees;
+          pendingCreatedWorktrees = [];
+          let addedBindings = pendingAddedBindings;
+          pendingAddedBindings = [];
+          let worktreeCommits = pendingWorktreeCommits;
+          pendingWorktreeCommits = [];
+          let blueprintMerges = pendingBlueprintMerges;
+          pendingBlueprintMerges = [];
+          if (await hooks.commitAgentStep(chatId, author, msgs,
+              {changes: stepChanges, createdGadgets, createdWorktrees, addedBindings,
+               worktreeCommits, blueprintMerges},
+              message.usage, handle.lastResponse?.aiGatewayLogId, handle.aiGatewayLogRoute)) {
+            ++nextChangeId;
+          }
+        });
 
         // Reset per-step streaming state.
         toolCallNotes.clear();
@@ -4114,6 +4205,17 @@ async function runAgentPass(
       event: "agent.turn.skipped", chatId,
     });
     return {type: "finished"};
+  }
+
+  // Report the catalogs that changed since the model last saw them. The record is the newest, so
+  // every earlier request stays a prefix of this one. It must not be written before the returns
+  // above: a `/compact` or skipped turn would then no longer be recognized as one.
+  let catalogChanges = findCatalogChanges(
+      seenAlwaysAvailableResources(listedResources, chatMessages, Infinity), currentResources);
+  if (catalogChanges.length > 0) {
+    let sequence = hooks.nextChatSequencePeek(chatId);
+    hooks.addChatMessages(chatId, author, [{type: "catalogChange", resources: catalogChanges}]);
+    replayCatalogChange(sequence, catalogChanges, Date.now());
   }
 
   let context: AgentContext = {

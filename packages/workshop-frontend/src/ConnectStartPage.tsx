@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { HANDOFF_KEY, readPopupStart } from './connectHandoff'
+import { NATIVE_AUTH_KEY } from './features/native-app/authPopup'
 
 /**
  * The page a connect / sign-in popup starts on (START_PATH) when the Workshop tab could not hand it
@@ -21,6 +22,9 @@ export default function ConnectStartPage() {
       return
     }
     try {
+      // An inherited copy of the opener's native relay record must not divert this popup's own
+      // nonce redemption (see `openDisownedPopup`).
+      sessionStorage.removeItem(NATIVE_AUTH_KEY)
       sessionStorage.setItem(HANDOFF_KEY, JSON.stringify(start.handoff))
     } catch {
       setError('This browser blocks storage in pop-ups, so the flow cannot complete. Allow site data for this site and try again.')

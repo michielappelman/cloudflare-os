@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AgentCatalog, AvatarImage, GatekeeperUiFrame, GatekeeperUserSelection, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 
@@ -195,6 +195,9 @@ export type UserNotification = {
   /** Current human-readable chat title. */
   chatTitle: string;
 };
+
+/** How long a workspace's notifications stay muted: until a time, or until the user unmutes it. */
+export type NotificationMute = { until: Date, indefinite?: never } | { indefinite: true, until?: never };
 
 /** Callback used by `AuthenticatedApi.subscribeToNotifications()`. */
 export interface NotificationSubscriber extends RpcTarget {
@@ -553,6 +556,12 @@ export interface AuthenticatedApi extends RpcTarget {
       subscriber: RpcStub<NotificationSubscriber>): Promise<RpcStub<{}>>;
 
   /**
+   * Mute a workspace in the user's list, so its finished tasks notify no tab or device, or unmute
+   * it with null. Permission requests still come through.
+   */
+  setWorkspaceNotificationMute(workspaceId: string, mute: NotificationMute | null): Promise<void>;
+
+  /**
    * List the user's configured AI models of one kind, by default the language models, which can
    * chat.
    *
@@ -711,6 +720,9 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
 
+  /** Pin or unpin this workspace in the user's list. */
+  setWorkspacePinned(workspaceId: string, pinned: boolean): Promise<void>;
+
   /**
    * List the outputs of all the user's workspaces. Used to display the Outputs page, which lets
    * the user find things they made without remembering which workspace they made them in.
@@ -771,6 +783,8 @@ export interface AuthenticatedApi extends RpcTarget {
    * on a connected account, expanding if needed. Returns a flow to open as a disowned popup (as for
    * connectAccount()) to authorize them, or null if nothing was needed. Completion is redeemed via
    * completeConnectHandoff(); the updated grant is then observable via subscribeConnectedAccounts().
+   * Returning null also re-reads the account's description, so a list of granted resource types
+   * that was out of date is corrected and observable the same way.
    */
   ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<ConnectFlowStart | null>;
 
@@ -816,6 +830,14 @@ export interface AuthenticatedApi extends RpcTarget {
     accountId: number,
     resourceUrlPattern: string,
   ): Promise<ResourceConfiguratorFrame>;
+
+  /**
+   * Get the UI in which the approver of a creation of the type `resourceUrlPattern` configures it
+   * in their connected account `accountId` (see SupportedResource.creationConfigurator). The
+   * frame's collectResourceUrl() gives CreationApproval.configuration.
+   */
+  startCreationConfigurator(accountId: number, resourceUrlPattern: string)
+      : Promise<GatekeeperUiFrame>;
 
   /**
    * Remove a shared gadget from the user's home page listing. Does NOT revoke the user's
@@ -922,6 +944,16 @@ export interface AuthenticatedApi extends RpcTarget {
    * in a sandboxed iframe and exposes `ui` to it over a MessagePort RPC session.
    */
   getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null>;
+
+  /**
+   * Mint a single-use ticket for a user selected on behalf of a gatekeeper app,
+   * redeemable through that gatekeeper app's exchange capability (see
+   * GatekeeperUserSelectionExchangeImpl). Returns null if the selected user is
+   * this user or does not exist.
+   */
+  createGatekeeperUserSelection(
+      vendorId: string, selectedUserId: string,
+  ): Promise<GatekeeperUserSelection | null>;
 
   // --- Deployment admin ---
 
@@ -2080,6 +2112,9 @@ export type GadgetMetadata = {
   /** Whether the user has pinned this gadget to the top of their list. */
   pinned?: boolean;
 
+  /** Set while the user has muted this workspace's notifications. */
+  notificationMute?: NotificationMute;
+
   /**
    * Set when the gadget is not owned by the current user. Presence of this field indicates the
    * user is a collaborator, not the owner.
@@ -2421,6 +2456,19 @@ export type ActionLogEntry = {
   // are enabled/disabled, which the user can freely toggle as often as they want.
 });
 
+/** How the approver of a creation (see ActionLogEntry.creation) chose to make it. */
+export type CreationApproval = {
+  /** The approver's connected account, for the gatekeeper's vendor, to create the resource in. */
+  accountId: number;
+
+  /**
+   * What the approver chose in that account's creation configurator (see
+   * AuthenticatedApi.startCreationConfigurator()): a vendor-defined URL only the gatekeeper reads.
+   * Omitted when they made no choice, as for a type without one.
+   */
+  configuration?: string;
+};
+
 export type BoundHookInfo = {
   id: number;
 
@@ -2525,9 +2573,6 @@ export interface Overseer extends RpcTarget {
 
   /** Change the workspace title. */
   setTitle(title: string): Promise<void>;
-
-  /** Pin or unpin this workspace in the user's list. */
-  setPinned(pinned: boolean): Promise<void>;
 
   /**
    * Instruct the workspace to delete itself, removing it from the User's workspace list and
@@ -2734,10 +2779,10 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Approve an action that is currently in the "pending" state. The action will be performed on
-   * approval. Approving a creation (see ActionLogEntry.creation) requires `accountId`: the
-   * approver's connected account, for the gatekeeper's vendor, in which the resource is created.
+   * approval. Approving a creation (see ActionLogEntry.creation) requires `creation`: how the
+   * approver chose to make it.
    */
-  approveAction(id: number, accountId?: number): Promise<void>;
+  approveAction(id: number, creation?: CreationApproval): Promise<void>;
 
   /**
    * Reject an action that is in the "pending" state. This notifies the gatekeeper that it will not
@@ -3881,6 +3926,18 @@ export type AiChatMessageBody = {
   type: "useGadget";
 } | {
   /**
+   * The always-available resources changed after the agent's system prompt listed them: a
+   * catalog changed, e.g. a skill was added to the Context Library, or the chat gained a resource,
+   * e.g. the owner turned on Web Search. The agent writes this before the model request that first
+   * sees the change, and tells the model what changed, so the system prompt can stay the same for
+   * the whole chat. Clients show nothing for it.
+   */
+  type: "catalogChange";
+
+  /** Each changed or new resource, as it is now. */
+  resources: AlwaysAvailableResource[];
+} | {
+  /**
    * Indicates that the agent run ended with an error (e.g. LLM API failure, abort, server
    * restart). This is displayed to the user with a "retry" button, but is NOT included in the
    * chat log sent to the LLM so the agent does not react to it.
@@ -3984,6 +4041,21 @@ export type AiChatMessageBody = {
    * turn-start naming chokepoint.
    */
   bindingName?: string;
+};
+
+/**
+ * A resource the agent can always use without requesting it (e.g. the Context Library's read
+ * session), as its system prompt lists it.
+ */
+export type AlwaysAvailableResource = {
+  /** The resource's binding name in the agent's `env`. */
+  name: string;
+
+  /** The resource's title. */
+  title: string;
+
+  /** The resource's discovery catalog, or null if it has none or it failed to load. */
+  catalog: AgentCatalog | null;
 };
 
 /**
