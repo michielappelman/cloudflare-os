@@ -12,6 +12,7 @@ import type {
 import { GatekeeperConnectCallbackImpl } from "../src/user.js";
 import { LoginConnectCallbackImpl } from "../src/auth/login-flow.js";
 import { OverseerDurableObject as RealOverseerDurableObject } from "../src/server.js";
+import { FakeChatResponseTarget } from "./response-target";
 
 export * from "../src/server.js";
 export { default } from "../src/server.js";
@@ -39,6 +40,12 @@ export class OverseerDurableObject extends RealOverseerDurableObject {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     restoreTargets.set(ctx, this);
+  }
+
+  [restore](params: Parameters<RealOverseerDurableObject[typeof restore]>[0] |
+      {type: "test-response-target"; name: string}) {
+    if (params.type === "test-response-target") return new FakeChatResponseTarget(params.name);
+    return super[restore](params);
   }
 }
 /**

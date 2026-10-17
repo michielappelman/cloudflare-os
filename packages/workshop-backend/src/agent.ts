@@ -1,7 +1,9 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AiChatStreamEvent, AlwaysAvailableResource, BlueprintBinding, BlueprintMerge, BlueprintOutput, ChatGadgetPin, ChatGadgetPinRecord, MainlineMergeGadget, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AiChatStreamEvent, AlwaysAvailableResource, BlueprintBinding, BlueprintMerge, BlueprintOutput, ChatGadgetPin, ChatGadgetPinRecord, MainlineMergeGadget, WorkpieceId, type AiModelConfig, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, MAX_CODE_CHANGE_SIZE, replaceSpanChange, validateCodeChangeSchema,
-  type CodeContent, type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
+  type FileContent, type CodeContent, type CodeChange,
+  type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
+import { canInlineChatAttachmentImage, decodeChatAttachmentText, isAllowedChatAttachmentImageMimeType } from './chat-attachment-validation';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { createWorkshopLogger, obsContext } from "./observability";
 import { createTracer } from "@gadgets/observability/tracing";
@@ -116,7 +118,7 @@ export interface WorktreeTurnAccess {
    * the tree -- worktree content is never materialized whole). Also exactly the overlay an
    * explicit commit()'s tree build applies over the pin base, together with getRemovedPaths().
    */
-  getOverlayFiles(worktreeId: WorkpieceId): ReadonlyMap<string, string>;
+  getOverlayFiles(worktreeId: WorkpieceId): ReadonlyMap<string, FileContent>;
 
   /** Paths whose latest change is a removal: absent from the overlay, but not from the base. */
   getRemovedPaths(worktreeId: WorkpieceId): ReadonlySet<string>;
@@ -258,7 +260,15 @@ async function describeBinding(
   let edge = info.bindings.find(binding => binding.name === name);
   if (edge) return hooks.describeBinding(envName, edge.target);
   if (name === GIT_BINDING_NAME) return hooks.describeGitBinding(envName);
-  if (name === "GADGET") return hooks.describeBinding(envName, info.id);
+  if (name === "GADGET") {
+    // Unlike the gadget bindings in the agent's env, a gadget's env.GADGET is
+    // the bare RPC stub.
+    return `Binding: ${envName}\n` +
+        `\n` +
+        `This binding is an RPC stub that points at the main Durable Object instance of the ` +
+        `Gadget ${JSON.stringify(info.title)} itself. Calling a method on the stub invokes the ` +
+        `same-named method on the class exported by the Gadget's server.js.`;
+  }
   throw new Error(`Gadget ${gadget} has no binding named "${name}".`);
 }
 
@@ -850,18 +860,18 @@ let greeter = await this.ctx.restore({type: "greeter", greeting: "Howdy"});
 await this.env.SOME_BINDING.registerGreeter(greeter);
 \`\`\`
 
-Typically, though, a Gadget doesn't register hooks from within its own code. Instead, you will probably want to register a hook once as part of an \`executeCode\` tool call. To facilitate this, within an \`executeCode\` invocation you have the ability to directly invoke each Gadget's restore method via its RPC stub. This is not normally possible over RPC, but the \`executeCode\` environment has been set up to make it possible. You can thus call a gadget's restorer in an \`executeCode\` invocation by providing code like:
+Typically, though, a Gadget doesn't register hooks from within its own code. Instead, you will probably want to register a hook once as part of an \`executeCode\` tool call. To facilitate this, within an \`executeCode\` invocation you have the ability to directly invoke each Gadget's restore method via its \`rpc\` stub. This is not normally possible over RPC, but the \`executeCode\` environment has been set up to make it possible. You can thus call a gadget's restorer in an \`executeCode\` invocation by providing code like:
 
 \`\`\`
 import { restore } from "cloudflare:workers";
 
 export default async function(self, env, ctx) {
-  let greeter = await env.MY_GADGET[restore]({type: "greeter", greeting: "Howdy"});
+  let greeter = await env.MY_GADGET.rpc[restore]({type: "greeter", greeting: "Howdy"});
   await env.SOME_BINDING.registerGreeter(greeter);
 }
 \`\`\`
 
-The call to \`env.MY_GADGET[restore](params)\` is equivalent to calling \`this.ctx.restore(params)\` from within the Gadget itself. This returns a persistent stub which you can then use as a hook callback.
+The call to \`env.MY_GADGET.rpc[restore](params)\` is equivalent to calling \`this.ctx.restore(params)\` from within the Gadget itself. This returns a persistent stub which you can then use as a hook callback.
 
 A Gadget can hold many persistent stubs at once, such as one hook per conversation it watches. Each is restored from its own \`params\`, so put whatever tells them apart there.
 `.trim();
@@ -876,6 +886,10 @@ You were started programmatically by the Gadget to perform a task, described bel
 Typically (but not always), you will need to use the \`executeCode\` tool to complete the task, invoking the available bindings (members of the env object) and other APIs available to you.
 
 Your \`env\` always contains \`env.GIT\`, which provides programmatic access to git commits known to the workspace (read a commit's metadata and files, edit them, and write new commits). Use \`describeBinding\` to learn its API if you need it.
+
+# Persistent Stubs and \`ctx.restore()\`
+
+Some APIs (especially hooks) take a "persistent" stub: one that can be stored and restored later through a Gadget's \`[restore](params)\` method. In \`executeCode\`, create one with \`env.MY_GADGET.rpc[restore](params)\` (after \`import { restore } from "cloudflare:workers"\`), which is equivalent to the Gadget calling \`this.ctx.restore(params)\`. The Gadget's server.js must define a \`[restore](params)\` method that returns the target for those params.
 `.trim();
 
 // The tools offered to a spawned agent (see runAgentPass). Anything that modifies a gadget or
@@ -1146,7 +1160,7 @@ async function formatBlueprintProposal(
 }
 
 let READ_FILE_TOOL_DESCRIPTION = `
-Read the content of a file owned by a workpiece (a gadget or worktree) in your \`env\`. If a file changes after you read it, you will either be informed of the change or the outdated result will be replaced with a note telling you to re-read the file; otherwise there is no need to read a file again after you have already read it once. This cannot read chat attachments; attachments are provided directly in the conversation.
+Read the content of a file owned by a workpiece (a gadget or worktree) in your \`env\`. If a file changes after you read it, you will either be informed of the change or the outdated result will be replaced with a note telling you to re-read the file; otherwise there is no need to read a file again after you have already read it once. Uploaded files are also available in the chat's scratch worktree when the system prompt lists one; use it for plans and other working files too. Use byte-aware binding operations for binary files.
 
 For a large file, pass \`startLine\` and \`lineCount\` to read a window of it; the result then ends with a line giving the range shown and the \`startLine\` to continue from. Use \`grep\` to find the lines you need first.
 `.trim();
@@ -1244,7 +1258,7 @@ let EXECUTE_CODE_TOOL_DESCRIPTION = `
 ${EXECUTE_CODE_INTRO}
 
 The 'env' object contains this chat's named bindings:
-* An entry for each Gadget in the workspace, under the name given in the system prompt's gadget list (or the name you passed to \`createGadget\`): an RPC stub pointing at the Gadget's server-side Durable Object. If the user asks you to interact with a Gadget directly, or asks if you can "see" it, use this stub (read the Gadget's server code to learn what RPC methods it exposes).
+* An entry for each Gadget in the workspace, under the name given in the system prompt's gadget list (or the name you passed to \`createGadget\`). Its \`rpc\` property is an RPC stub pointing at the Gadget's server-side Durable Object: if the user asks you to interact with a Gadget directly, or asks if you can "see" it, use this stub (read the Gadget's server code to learn what RPC methods it exposes). Its \`exports\` property exports the Gadget as a file in any format it offers, the same files a user gets from the Workshop's Export menu; use \`describeBinding\` to learn its API if you need it.
 * An entry for each external resource available to this chat: those listed in the system prompt, those the user grants in messages (shown as \`[Resource Title](env.SOME_NAME)\`), and those you obtain with \`requestConnection\`.
 
 Note that this differs from the \`env\` a Gadget's own code sees: a Gadget's server.js sees only that Gadget's own bindings (listed in the system prompt's gadget list), which are wired up separately with \`setGadgetBinding\`. Your bindings and a Gadget's bindings may point at the same resource under the same or different names.
@@ -1260,7 +1274,7 @@ let SPAWNED_EXECUTE_CODE_TOOL_DESCRIPTION = `
 ${EXECUTE_CODE_INTRO}
 
 The 'env' object contains this chat's named bindings:
-* Each binding listed in the system prompt. A Gadget's binding is an RPC stub pointing at the Gadget's server-side Durable Object; read the Gadget's server code to learn what RPC methods it exposes.
+* Each binding listed in the system prompt. A Gadget's binding has an \`rpc\` property, an RPC stub pointing at the Gadget's server-side Durable Object (read the Gadget's server code to learn what RPC methods it exposes), and an \`exports\` property that exports the Gadget as a file (use \`describeBinding\` to learn its API).
 * Each resource a user grants in a message, shown as \`[Resource Title](env.SOME_NAME)\`.
 * Each worktree you create with \`createWorktree\`, under the name you chose.
 
@@ -1655,6 +1669,14 @@ async function runAgentPass(
       worktreeRemovedPaths.get(worktreeId)?.has(filename)
           ? undefined : await faultWorktreeBase(worktreeId, filename);
 
+  // Reading a blob-backed UTF-8 upload must not change its representation: text edits over
+  // byte replacements still require a separate composition protocol.
+  let readSessionText = async (id: WorkpieceId, filename: string): Promise<string | undefined> => {
+    const value = sessionContent.get(id)?.get(filename);
+    return value === undefined || typeof value === "string" ? value
+      : hooks.readBlobText(value.oid, filename);
+  };
+
   // A file as readFile shows it, or undefined if it does not exist. An unpinned workpiece with
   // committed code is read live at its base -- a gadget's head (fixed for the turn; see
   // observeHead) or a worktree's accepted commit -- by path, never by materializing the tree,
@@ -1671,7 +1693,7 @@ async function runAgentPass(
       let base = observeHead(id) ?? hooks.getWorktreePinBase(id);
       if (base !== undefined) return await hooks.readFileAtCommitWithOid(base, filename);
     }
-    let text = sessionContent.get(id)?.get(filename) ?? await readWorktreeBase(id, filename);
+    let text = await readSessionText(id, filename) ?? await readWorktreeBase(id, filename);
     return text === undefined ? undefined : {text};
   };
 
@@ -1760,6 +1782,10 @@ async function runAgentPass(
         }
         let newContent = sessionContent.get(id)?.get(filename);
         if (oldContent === newContent) continue;
+        if ((newContent !== undefined && typeof newContent !== "string") ||
+            (oldContent !== undefined && typeof oldContent !== "string")) {
+          fileDiffParts.push(`${filename}: binary content changed`); continue;
+        }
         let diff = formatUnifiedDiff(
             filename, oldContent ?? "", newContent ?? "", oldContent !== undefined, true);
         if (diff) {
@@ -1918,7 +1944,7 @@ async function runAgentPass(
       let removed = worktreeRemovedPaths.get(workpieceId);
       for (let [filename, stamp] of files) {
         let text = content?.get(filename);
-        if (text !== undefined) {
+        if (typeof text === "string") {
           files.set(filename, await blobOid(text));
         } else if (stamp === undefined || removed?.has(filename)) {
           files.delete(filename);
@@ -2105,6 +2131,13 @@ async function runAgentPass(
     applyReplayedChange(checkpoint.proposedChange, false);
   }
 
+  // Count across the whole replay, not just the latest upload batch. PDFs also count on some
+  // providers; conservatively include candidate parts even if their headers later rule them out.
+  const attachmentImageCount = chatMessages.reduce((count, msg) => count + (msg.type === "message"
+    ? msg.attachments?.filter(attachment => isAllowedChatAttachmentImageMimeType(attachment.mimeType) ||
+        (attachment.mimeType === PDF_MIME_TYPE && modelApiSupportsPdfAttachments(handle.model.api))).length ?? 0
+    : 0), 0);
+  const attachmentImageMaxEdge = attachmentImageCount > 20 ? 2000 : 8000;
   for (let [msgIndex, msg] of chatMessages.entries()) {
     let modelMessageStart = modelMessages.length;
     let msgTimestamp = msg.timestamp.getTime();
@@ -2175,17 +2208,34 @@ async function runAgentPass(
               let attachmentParts = await Promise.all(msg.attachments.map(
                   async (attachment): Promise<(TextContent | ImageContent)[]> => {
                 let filename = attachment.name ? ` (${attachment.name})` : "";
-                let data = await hooks.getChatAttachmentData(chatId, attachment.id);
-                if (attachment.mimeType.startsWith("image/")) {
-                  return [{
+                let workspaceLocation = attachment.workspacePath && agentContext.scratch
+                    ? `; workspace file env.${agentContext.scratch.bindingName}/` +
+                      attachment.workspacePath
+                    : "";
+                let data: Uint8Array;
+                try {
+                  data = await hooks.getChatAttachmentData(chatId, attachment.id);
+                } catch (error) {
+                  // A missing legacy payload must not make the entire conversation unusable.
+                  // Keep the reference visible, retry on later replay, and never invent bytes.
+                  logger.warn("chat attachment unavailable during replay", {
+                    event: "chat.attachment.replay.unavailable", chatId, sequence: msg.sequence, error,
+                  });
+                  return [{type: "text", text: `\n\n[Attached file${filename}${workspaceLocation}; ` +
+                    "original contents are currently unavailable.]"}];
+                }
+                let text = decodeChatAttachmentText(attachment.mimeType, data);
+                if (canInlineChatAttachmentImage(attachment.mimeType, data, attachmentImageMaxEdge)) {
+                  return [{type: "text", text: `\n\n[Attached image${filename}${workspaceLocation}]`}, {
                     type: "image",
                     data: data.toBase64(),
                     mimeType: attachment.mimeType,
                   }];
-                } else if (isTextLikeAttachmentMimeType(attachment.mimeType)) {
+                } else if (text !== undefined) {
                   return [{
                     type: "text",
-                    text: `\n\n[Attached text file${filename}]\n${new TextDecoder().decode(data)}`,
+                    text: `\n\n[Attached text file${filename}${workspaceLocation}]\n` +
+                        text,
                   }];
                 } else if (attachment.mimeType === PDF_MIME_TYPE &&
                            modelApiSupportsPdfAttachments(handle.model.api)) {
@@ -2194,17 +2244,16 @@ async function runAgentPass(
                   // before the request goes out (see chat-attachment-pdf.ts). The text part
                   // carries the filename, which the disguised part cannot.
                   return [
-                    {type: "text", text: `\n\n[Attached PDF file${filename}]`},
+                    {type: "text", text: `\n\n[Attached PDF file${filename}${workspaceLocation}]`},
                     {type: "image", data: data.toBase64(), mimeType: attachment.mimeType},
                   ];
                 } else {
-                  // Attachment types the current model can't take -- a PDF after the chat moved
-                  // to a Workers AI/Ollama model, or types some providers accepted before the pi
-                  // migration -- degrade to a text marker rather than failing the whole replay.
+                  // Model input support does not restrict workspace files. Never decode binary
+                  // uploads lossily or send unsupported formats to a provider as image parts.
                   return [{
                     type: "text",
-                    text: `\n\n[Attached file${filename} (${attachment.mimeType}) omitted — ` +
-                        `this file type is not supported by the current model]`,
+                    text: `\n\n[Attached file${filename} (${attachment.mimeType})${workspaceLocation}; ` +
+                        `binary contents are not inlined. Use byte-aware tools to inspect the workspace file.]`,
                   }];
                 }
               }));
@@ -2321,14 +2370,16 @@ async function runAgentPass(
                     if (hooks.isWorktree(workpieceId)) {
                       await ensureReplayContentForWrite(workpieceId, msg.sequence);
                     }
-                    let value: string | null =
-                        sessionContent.get(workpieceId)?.get(toolCall.input.filename) ??
+                    const edits = pendingReplayEdits.filter(edit => edit.workpieceId === workpieceId &&
+                      edit.filename === toolCall.input.filename);
+                    const lastWrite = edits.findLastIndex(edit => edit.toolName === "writeFile");
+                    // A whole-file write supersedes even an unreadable binary base. Do not
+                    // read that obsolete base before replaying the successful replacement.
+                    let value: string | null = lastWrite >= 0 ? null
+                      : await readSessionText(workpieceId, toolCall.input.filename) ??
                         await faultWorktreeBase(workpieceId, toolCall.input.filename) ?? null;
-                    for (let edit of pendingReplayEdits) {
-                      if (edit.workpieceId === workpieceId &&
-                          edit.filename === toolCall.input.filename) {
-                        value = applyPendingEditToText(value, edit);
-                      }
+                    for (let edit of edits.slice(Math.max(0, lastWrite))) {
+                      value = applyPendingEditToText(value, edit);
                     }
                     if (value === null) {
                       throw new Error("File does not exist.");
@@ -2711,7 +2762,7 @@ async function runAgentPass(
       }
 
       case "agentNudge":
-        // Obsolete: no longer emitted, replayed for old chat logs only.
+        // A decision resume's durable handoff, without impersonating a new user prompt.
         modelMessages.push({ role: "user", content: msg.text, timestamp: msgTimestamp });
         break;
 
@@ -2922,7 +2973,7 @@ async function runAgentPass(
     getOverlayFiles: id => sessionContent.get(id) ?? new Map(),
     getRemovedPaths: id => worktreeRemovedPaths.get(id) ?? new Set(),
     readFile: async (id, path) =>
-        sessionContent.get(id)?.get(path) ?? await readWorktreeBase(id, path),
+        await readSessionText(id, path) ?? await readWorktreeBase(id, path),
     appendChange: (id, path, change) => {
       appendAgentEdit(id, {[id]: [[path, change]]});
       // A write leaves the caller knowing the file's exact content, so it counts as a read for
@@ -2970,8 +3021,8 @@ async function runAgentPass(
       let lines = namedSeeds.map(seed =>
           `* env.${seed.name} — ` +
           (seed.isGadget
-              ? `RPC stub to the server-side Durable Object of the Gadget ` +
-                `${JSON.stringify(seed.title)}.`
+              ? `the Gadget ${JSON.stringify(seed.title)}: \`.rpc\` is an RPC stub to its ` +
+                `server-side Durable Object, \`.exports\` exports it as a file.`
               : seed.title));
       systemPromptBindings =
           `You have access to the following bindings via the \`env\` object:\n${lines.join("\n")}`;
@@ -3428,6 +3479,7 @@ async function runAgentPass(
           if (before === undefined) {
             throw new Error("File does not exist.");
           }
+          if (typeof before !== "string") throw new Error("Binary content requires byte operations.");
           let pos = findEditPos(before, textToReplace);
           if (replacement !== textToReplace) {
             let edit = replaceSpanChange(before.length, pos, textToReplace, replacement);

@@ -587,6 +587,12 @@ export type AiChatAgentContext = {
    */
   alwaysAvailableCapsuleIds?: WorkpieceId[];
 
+  /** Chat-private Git worktree for uploads, plans, and other agent working files. */
+  scratch?: {worktreeId: WorkpieceId, bindingName: string};
+
+  /** Legacy originals have been published as blobs and projected into this chat's scratch worktree. */
+  attachmentsMigrated?: true;
+
   /**
    * The part of the agent's system prompt that lists the workspace's gadgets, each with its files
    * and bindings, saved when the chat's first turn built it.
@@ -720,9 +726,9 @@ export type CompactionCheckpoint = {
 
 /**
  * Server-only record describing an in-progress agent turn, enabling resumption after a server
- * restart. Keyed by chatId. A record is present (mirroring `chatMeta.activeAgent`) for exactly as
- * long as an agent turn is, or should be, running. On startup, the set of these records identifies
- * which agents were interrupted by a restart and need to be resumed.
+ * restart. Keyed by chatId. `chatMeta.activeAgent` identifies runnable records; a paused turn
+ * retains its record (and original authority) until its logged decisions are ready. No separate
+ * wait state is stored: the chat log already contains the requests and their outcomes.
  *
  * Note we deliberately do NOT store the resolved `AiModelConfig` here, because it contains a secret
  * API token. Instead we store enough to re-fetch it from the initiator's user DO on resume.
@@ -740,6 +746,8 @@ export type ActiveAgentRecord = {
   initiator: AiChatAuthorInfo;
   /** Whether this turn was initiated by a gadget callback (vs. a chat message). */
   callbackInitiated: boolean;
+  /** Model-lookup attempts since the last successful preparation, bounded across DO resets. */
+  resumeAttempts?: number;
 };
 
 /**
@@ -826,17 +834,26 @@ export type ExternalChatRecord = {
 type ChatAttachmentContentRecord = {
   fileId: string;
   data: Uint8Array;
-  state:
-    | {
-        type: "staged";
-        uploadedAt: number;
-        mimeType: string;
-        name?: string;
-      }
-    | {
-        type: "committed";
-        chatId: number;
-      };
+  state: {
+    type: "staged";
+    uploadedAt: number;
+    mimeType: string;
+    name?: string;
+  };
+} | {
+  fileId: string;
+  /** Retained for inline image previews and legacy attachments committed before Git ingress. */
+  data?: Uint8Array;
+  state: {
+    type: "committed";
+    chatId: number;
+    /** Original upload blob; new uploads keep no separate attachment byte copy. */
+    oid?: string;
+    /** Path in the chat's scratch worktree, independent of the uploaded file's format. */
+    workspacePath?: string;
+    /** Legacy immutable Git source commit for replay and download. */
+    workspaceCommitId?: string;
+  };
 };
 
 // =======================================================================================
@@ -1474,9 +1491,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey: "id"
       }),
 
-      // Attachment bytes. Before an attachment is committed to a chat message, this also carries
-      // the temporary metadata needed to construct its ChatAttachmentRef. Once committed, the
-      // message owns that metadata and this record retains only the bytes and owning chat ID.
+      // Chat-scoped attachment source metadata. New uploads point to immutable Git blobs;
+      // legacy records can still hold staged or committed bytes.
       chatAttachmentContent: collection<ChatAttachmentContentRecord>()({
         primaryKey: "fileId",
         nonUniqueIndexes: {
