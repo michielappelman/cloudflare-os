@@ -1,5 +1,5 @@
 import { classifyRpcError, logRpcFailure, rpcFailureDescription } from "../rpcErrors";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useKumoToastManager } from "@cloudflare/kumo";
 import { ChatComposer } from "../features/chat/composer/ChatComposer";
@@ -22,6 +22,7 @@ import {
 import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
+import { loadDefaultConnections } from "../features/default-connections/defaultConnections";
 
 type HomeSearch = {
   prompt?: string;
@@ -58,6 +59,9 @@ export function HomePageContent({ prompt }: HomeSearch) {
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   // Bumped each time a task suggestion is picked; the composer re-seeds its text off the nonce.
   const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
+  const userId = currentUser?.id;
+  const defaultConnections = useMemo(
+    () => userId === undefined ? [] : loadDefaultConnections(userId), [userId]);
 
   useEffect(() => {
     if (!prompt) return;
@@ -202,6 +206,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
           selectedModel={selectedModel === null ? null : { id: selectedModel }}
           onModelChange={handleModelChange}
           newChat
+          defaultConnections={defaultConnections}
           offerFormats
           autoFocus
           minRows={3}

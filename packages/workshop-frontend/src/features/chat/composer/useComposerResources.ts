@@ -9,6 +9,7 @@ import {
   refineComposerResourceUrl,
   replaceComposerUrlWithCapsule,
   type ComposerCapsule,
+  type ComposerDocumentCaretTransition,
   type ComposerDocument,
   type ComposerSelection,
   type ComposerUrlRange,
@@ -17,6 +18,7 @@ import type {
   CommitDocumentEditOptions,
   ComposerDocumentSnapshot,
 } from "./draft/useComposerDraft";
+import type { DefaultConnection } from "../../default-connections/defaultConnections";
 
 const URL_REGEX = /https?:\/\/[^\s)>\]]*/g;
 
@@ -147,9 +149,14 @@ export const useComposerResources = ({
   const lastScanRef = useRef({ position: -1, text: "", documentRevision: -1 });
   activeUrlRef.current = activeUrl;
 
-  useEffect(() => () => {
-    operationRef.current++;
-    attachTargetRef.current = undefined;
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      operationRef.current++;
+      attachTargetRef.current = undefined;
+    };
   }, []);
 
   const hideUrl = () => {
@@ -348,6 +355,61 @@ export const useComposerResources = ({
     }
   };
 
+  // Creates a gatekeeper for each default connection and inserts the capsules, in order, at the
+  // start of the prompt. Failed defaults are reported and skipped; the rest still go in.
+  const insertDefaultCapsules = async (
+    defaults: DefaultConnection[],
+  ) => {
+    const created = await Promise.all(defaults.map(async (entry) => {
+      try {
+        const gatekeeper = await createCapsuleGatekeeper(entry.accountId, entry.resourceUrl);
+        if (!gatekeeper) throw new Error("No connection was created");
+        try {
+          const [gatekeeperId, description] = await Promise.all([
+            gatekeeper.getId(),
+            gatekeeper.describe(),
+          ]);
+          return { gatekeeper, capsule: { gatekeeperId, description, vendorId: entry.vendorId } };
+        } catch (error) {
+          await removeUnusedGatekeeper(gatekeeper);
+          gatekeeper[Symbol.dispose]();
+          throw error;
+        }
+      } catch (error) {
+        console.error("Failed to add default connection:", error);
+        onError(`Couldn't add default connection ${entry.label}`, rpcFailureDescription(error));
+        return null;
+      }
+    }));
+    const ready = created.filter((entry) => entry !== null);
+    let inserted = false;
+    try {
+      // Unmounted while connecting: drop the connections.
+      if (!mountedRef.current || ready.length === 0) return;
+      const result = commitDocumentEdit(getDocumentSnapshot(), (document) => {
+        let transition: ComposerDocumentCaretTransition | null = { document, caret: 0 };
+        for (const { capsule } of ready) {
+          transition = insertComposerCapsule(
+            transition.document,
+            transition.caret,
+            capsule,
+            capsuleTokenText(capsule.description, capsule.vendorId),
+          );
+          if (!transition) return null;
+        }
+        return transition;
+      }, { allowPresentationChanges: true });
+      if (!result) return;
+      inserted = true;
+      onConnectionCreated();
+    } finally {
+      for (const { gatekeeper } of ready) {
+        if (!inserted) await removeUnusedGatekeeper(gatekeeper);
+        gatekeeper[Symbol.dispose]();
+      }
+    }
+  };
+
   return {
     activeUrl,
     attachCreated,
@@ -355,6 +417,7 @@ export const useComposerResources = ({
     attachModalPrefill: attachModal?.prefill,
     closeAttachModal,
     createCapsule,
+    insertDefaultCapsules,
     dismissUrl,
     isCreatingResource,
     openAttachModal,

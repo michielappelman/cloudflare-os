@@ -156,6 +156,60 @@ describe("ChatComposer", () => {
     expect(testState.addToast).not.toHaveBeenCalled();
   });
 
+  it("starts with default connections as capsules and skips one that fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const createCapsuleGatekeeper = vi.fn<
+      Parameters<typeof ChatComposer>[0]["createCapsuleGatekeeper"]
+    >(async (accountId) => {
+      if (accountId === 2) throw new Error("credentials expired");
+      return {
+        getId: async () => `gk-${accountId}`,
+        describe: async () => ({ title: accountId === 1 ? "Inbox" : "Photos" }),
+        remove: async () => {},
+        [Symbol.dispose]: () => {},
+      } as never;
+    });
+    const onSend = vi.fn<Parameters<typeof ChatComposer>[0]["onSend"]>();
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(
+      <ChatComposer
+        createCapsuleGatekeeper={createCapsuleGatekeeper}
+        getOverseer={() => ({} as RpcStub<Overseer>)}
+        onSend={onSend}
+        isAgentActive={false}
+        models={[]}
+        selectedModel={{ id: "model-a" }}
+        onModelChange={() => {}}
+        defaultConnections={[1, 2, 3].map((accountId) => ({
+          accountId, vendorId: "v", resourceUrl: `https://r/${accountId}`, label: `R${accountId}`,
+        }))}
+      />,
+    ));
+    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
+    expect(textarea.value).toBe("Inbox Photos ");
+    expect(testState.addToast).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Couldn't add default connection R2",
+    }));
+
+    await typeText(textarea, "Inbox Photos summarize");
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledWith(
+      expect.stringContaining("summarize"),
+      "model-a",
+      [
+        expect.objectContaining({ gatekeeperId: "gk-1" }),
+        expect.objectContaining({ gatekeeperId: "gk-3" }),
+      ],
+      undefined,
+      undefined,
+    );
+  });
+
   it.each([
     { error: new Error("Peer closed WebSocket"), transient: true },
     { error: new Error("send rejected"), transient: false },
