@@ -1,9 +1,6 @@
 import { useState } from "react";
-import type { RpcStub } from "capnweb";
-import { X } from "@phosphor-icons/react";
-import type { AuthenticatedApi } from "@gadgets/workshop-shared/api";
-import ResourcePicker from "../../ResourcePicker";
-import { normalizeResourceUrl } from "../../resourceMatching";
+import { Plus, X } from "@phosphor-icons/react";
+import GatekeeperModal from "../../GatekeeperModal";
 import { GatekeeperIcon } from "../../components/GatekeeperIcon";
 import {
   loadDefaultConnections,
@@ -11,22 +8,14 @@ import {
   type DefaultConnection,
 } from "./defaultConnections";
 
-const INPUT =
-  "h-10 w-full rounded-lg border border-kumo-line bg-kumo-base px-3 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[14px]";
-
 /**
- * Settings list of the connections every new chat starts with. Adding one works like pasting a
- * resource URL into the composer: type the URL, then pick the account that should open it.
+ * Settings list of the connections every new chat starts with. Adding one uses the same dialog as
+ * attaching a connection in the composer, in choose-only mode: it records the account and resource
+ * the user picks, and the Home composer creates the connection for each new chat.
  */
-export function DefaultConnectionsSetting({
-  api,
-  userId,
-}: {
-  api: RpcStub<AuthenticatedApi>;
-  userId: number | string;
-}) {
+export function DefaultConnectionsSetting({ userId }: { userId: number | string }) {
   const [connections, setConnections] = useState(() => loadDefaultConnections(userId));
-  const [url, setUrl] = useState("");
+  const [adding, setAdding] = useState(false);
 
   const update = (next: DefaultConnection[]) => {
     saveDefaultConnections(userId, next);
@@ -47,13 +36,8 @@ export function DefaultConnectionsSetting({
               className="flex items-center gap-2 px-3 py-2"
             >
               <GatekeeperIcon vendorId={connection.vendorId} fallbackText={connection.label} size={16} />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13px] text-kumo-default">
-                  {connection.label}
-                </span>
-                <span className="block truncate text-[12px] text-kumo-subtle">
-                  {connection.resourceUrl}
-                </span>
+              <span className="min-w-0 flex-1 truncate text-[13px] text-kumo-default">
+                {connection.label}
               </span>
               <button
                 type="button"
@@ -67,38 +51,23 @@ export function DefaultConnectionsSetting({
           ))}
         </ul>
       )}
-      <input
-        type="url"
-        value={url}
-        onChange={(event) => setUrl(event.target.value)}
-        placeholder="Paste a resource URL to add it"
-        aria-label="Resource URL"
-        className={INPUT}
+      <button
+        type="button"
+        onClick={() => setAdding(true)}
+        className="press inline-flex h-9 w-fit cursor-pointer items-center gap-1.5 rounded-lg border border-kumo-line px-3 text-[13px] font-medium tracking-[-0.25px] text-kumo-default transition-colors hover:bg-kumo-tint"
+      >
+        <Plus size={14} />
+        Add connection
+      </button>
+      <GatekeeperModal
+        open={adding}
+        onClose={() => setAdding(false)}
+        onChosen={(choice) => update([
+          ...connections.filter((existing) =>
+            existing.accountId !== choice.accountId || existing.resourceUrl !== choice.resourceUrl),
+          choice,
+        ])}
       />
-      {url.trim() && (
-        <ResourcePicker
-          authenticatedApi={api}
-          searchText={url.trim()}
-          compact
-          onRefine={(newUrl) => setUrl(newUrl)}
-          onSelectAccount={(accountId, vendorId, _resource, account, vendor) => {
-            const resourceUrl = normalizeResourceUrl(url.trim());
-            const accountName = account.uniqueName ?? account.displayName;
-            const entry: DefaultConnection = {
-              accountId,
-              vendorId,
-              resourceUrl,
-              label: accountName ? `${vendor.displayName} (${accountName})` : vendor.displayName,
-            };
-            update([
-              ...connections.filter((existing) =>
-                existing.accountId !== accountId || existing.resourceUrl !== resourceUrl),
-              entry,
-            ]);
-            setUrl("");
-          }}
-        />
-      )}
     </div>
   );
 }

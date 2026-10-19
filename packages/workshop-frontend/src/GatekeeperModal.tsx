@@ -41,9 +41,16 @@ import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer
 import { openConnectWindow } from './connectHandoff'
 import { AuthPopupCancelledError } from './features/native-app/authPopup'
 
-export interface GatekeeperModalProps {
-  open: boolean
-  onClose: () => void
+/** A resource connection picked in choose-only mode: what `newGatekeeper()` would be called with. */
+export type ChosenResourceConnection = {
+  accountId: number
+  vendorId: string
+  resourceUrl: string
+  /** The connection type and account, for display, e.g. "Jottacloud Folder (me@example.com)". */
+  label: string
+}
+
+type GatekeeperModalCreation = {
   /**
    * Returns an overseer stub. Called only when actually creating a gatekeeper. This allows
    * the Home page to lazily provision a gadget on first use.
@@ -55,6 +62,21 @@ export interface GatekeeperModalProps {
    * and shows a loading state while it runs.
    */
   onCreated: (gk: RpcStub<GatekeeperClient<any>>) => Promise<void>
+  onChosen?: never
+} | {
+  /**
+   * Choose-only mode, for configuring connections outside any workspace (Settings): the modal
+   * offers only resource connections and reports the account and resource URL the user picked
+   * instead of creating a gatekeeper.
+   */
+  onChosen: (choice: ChosenResourceConnection) => void
+  getOverseer?: never
+  onCreated?: never
+}
+
+export type GatekeeperModalProps = GatekeeperModalCreation & {
+  open: boolean
+  onClose: () => void
   /**
    * Workpieces offered as env entries when creating an agent spawner (see AgentSpawnerConfig.env),
    * normally the gadget the spawner is being created for plus that gadget's own bindings. All are
@@ -188,8 +210,9 @@ function accountSupportsConnection(account: AccountOption, connection: Connectio
 }
 
 export default function GatekeeperModal({
-  open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
+  open, onClose, spawnerEnvCandidates,
   initialVendorId, initialResourceUrl, initialResourceUrlPattern, initialAccountId,
+  ...creation
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -256,10 +279,10 @@ export default function GatekeeperModal({
 
   const siteName = useSiteName()
   const allConnections = useMemo(() => [
-    ...platformConnectionTypes(siteName),
+    ...(creation.onChosen ? [] : platformConnectionTypes(siteName)),
     ...vendors.flatMap(vendor => vendor.supportedResources
       .map(resource => connectionForResource(vendor, resource))),
-  ], [siteName, vendors])
+  ], [creation.onChosen, siteName, vendors])
 
   const selectedConnection = useMemo(
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
@@ -676,10 +699,11 @@ export default function GatekeeperModal({
     let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
     let transferred = false
     try {
-      const overseer = await getOverseer()
+      if (creation.onChosen) return
+      const overseer = await creation.getOverseer()
       gatekeeper = await overseer.newAiModelGatekeeper(selectedModelId)
       if (gatekeeper) {
-        await onCreated(gatekeeper)
+        await creation.onCreated(gatekeeper)
         transferred = true
         onClose()
       } else {
@@ -713,10 +737,11 @@ export default function GatekeeperModal({
     let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
     let transferred = false
     try {
-      const overseer = await getOverseer()
+      if (creation.onChosen) return
+      const overseer = await creation.getOverseer()
       gatekeeper = await overseer.newAgentSpawnerGatekeeper(config)
       if (gatekeeper) {
-        await onCreated(gatekeeper)
+        await creation.onCreated(gatekeeper)
         transferred = true
         onClose()
       } else {
@@ -746,10 +771,24 @@ export default function GatekeeperModal({
       }
       const resourceUrl = await configuratorCollectResourceUrlRef.current?.()
       if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
-      const overseer = await getOverseer()
+      if (creation.onChosen) {
+        const vendorId = selectedConnection.vendorId
+        if (!vendorId) throw new Error('Connection has no vendor.')
+        const account = matchingAccounts.find(a => a.id === selectedAccountId)?.description
+        const accountName = account?.uniqueName ?? account?.displayName
+        creation.onChosen({
+          accountId: selectedAccountId,
+          vendorId,
+          resourceUrl,
+          label: accountName ? `${selectedConnection.title} (${accountName})` : selectedConnection.title,
+        })
+        onClose()
+        return
+      }
+      const overseer = await creation.getOverseer()
       gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
       if (gatekeeper) {
-        await onCreated(gatekeeper)
+        await creation.onCreated(gatekeeper)
         transferred = true
         onClose()
       } else {
