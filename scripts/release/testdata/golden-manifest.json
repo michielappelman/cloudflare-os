@@ -400,6 +400,10 @@
     "gatekeeper-google": {
       "bindings": [
         {
+          "name": "AI",
+          "type": "ai"
+        },
+        {
           "name": "CLIENT_ID",
           "text": "$SECRET(CLIENT_ID)",
           "type": "secret_text"
