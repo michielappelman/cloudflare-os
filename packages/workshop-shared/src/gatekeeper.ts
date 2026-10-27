@@ -722,8 +722,8 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
 /**
  * The version tag of the running version of a Worker, read from the `CF_VERSION_METADATA`
  * version-metadata binding in its `env`, or undefined when it has no such binding or the tag is
- * empty. Never throws. Takes `env` as a plain object because no public Worker config declares the
- * binding: the service that installs a deployment adds it.
+ * empty. Never throws. Takes `env` as a plain object because no public gatekeeper config declares
+ * the binding: the service that installs a deployment adds it.
  */
 export function workerVersionTag(env: object): string | undefined {
   try {
@@ -1155,6 +1155,10 @@ export interface Gatekeeper<Session> extends DurableObject {
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
    * associated storage.
+   *
+   * Rejecting withdraws the action and must succeed even when the provider outcome of an earlier
+   * `applyAction()` is uncertain: refusing would leave the user no way to clear it. The gatekeeper
+   * stops tracking the action; an effect that already landed at the provider stays.
    *
    * If the returned `restart` flag is true, rejecting this action requires restarting the Gadget.
    * This is sometimes needed by gatekeepers that simulate actions as if they had been approved --
