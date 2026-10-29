@@ -34,7 +34,8 @@ import {
 } from "@gadgets/workshop-shared/api";
 import { traceChat } from "./agent-tracing.js";
 import {
-  AiGatewayConfig, getAiGatewayConfig, getGatewayModels, type AiGatewayLogRoute,
+  AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, getAiGatewayConfig, getGatewayModels,
+  type AiGatewayLogRoute,
 } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
@@ -115,16 +116,17 @@ export type ModelHandle = {
   aiGatewayLogRoute?: AiGatewayLogRoute;
 
   /**
-   * Status and AI Gateway log id of the most recent HTTP response observed by `stream`. Reset at
-   * the start of every request and set from pi's onResponse callback (which fires only once a
-   * response arrives -- an SDK-level failure leaves this undefined), so consumers must read it
-   * right after the request they care about completes. Turns run requests sequentially, so this
-   * is safe.
+   * Status and AI Gateway log id of the most recent HTTP response observed by `stream`, and for
+   * the Auto Router model the gateway model that answered. Reset at the start of every request
+   * and set from pi's onResponse callback (which fires only once a response arrives -- an
+   * SDK-level failure leaves this undefined), so consumers must read it right after the request
+   * they care about completes. Turns run requests sequentially, so this is safe.
    */
   lastResponse?: {
     status: number;
     aiGatewayLogId?: string;
-    /** Auto Router's choice for the request; absent for every other model. */
+    routedModel?: string;
+    /** Auto Router's choice for the request, with its reason; absent for every other model. */
     routing?: Pick<AiModelRouting, "model" | "reason" | "decisionId">;
     /** From sending the request to the end of the response, once the response has ended. */
     durationMs?: number;
@@ -198,6 +200,12 @@ const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
 };
 
 const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+// What the Auto Router model's answers cost per million tokens, roughly: the router picks among
+// frontier models priced around Claude Sonnet's. A chat's real cost comes from the gateway's log
+// of each request, which prices the model that answered (see AiGatewayLogRoute); the estimate
+// only sizes the resends that keep a prompt cached (see CachedRequest).
+const AUTO_ROUTER_COST: ModelCost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
 
 // pi's builtin catalogs, by provider. Import per-provider, not providers/all.
 const CATALOGS: Partial<Record<AiModelProvider, Record<string, Model<Api>>>> = {
@@ -307,14 +315,12 @@ function workersAiCompat(catalog: CatalogEntry | undefined): OpenAICompletionsCo
 // (https://gateway.ai.cloudflare.com/v1/{accountId}/{gateway}) or, for binding-routed requests,
 // over the AI binding (https://workers-binding.ai/ai-gateway/gateways/{gateway}); each
 // provider's native API is exposed under the same per-provider path on either. AI Gateway also
-// offers a unified OpenAI-compat
-// translation layer (/compat), which we deliberately never use: we already speak every
-// provider's native API, and the translation drops provider features pi relies on (extended
-// thinking, Anthropic cache_control prompt caching, the OpenAI Responses API) -- with one
-// exception: AI Gateway's Auto Router (AUTO_ROUTER_MODEL_ID) exists only on /compat, so choosing it
-// trades those features for per-request model selection. Billing --
-// including unified billing on a user's own gateway -- is orthogonal to which API a request
-// speaks. Returns undefined for providers AI Gateway cannot serve (ollama).
+// offers a unified OpenAI-compat translation layer (/compat), which only the Auto Router model
+// speaks, because the router exists nowhere else: for every other model we speak the provider's
+// native API, since the translation drops provider features pi relies on (extended thinking,
+// Anthropic cache_control prompt caching, the OpenAI Responses API). Billing -- including unified
+// billing on a user's own gateway -- is orthogonal to which API a request speaks. Returns
+// undefined for providers AI Gateway cannot serve (ollama).
 function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Api> | undefined {
   const catalog = gatewayCatalogModel(config);
   const window = modelTokenWindow(config, catalog);
@@ -369,22 +375,6 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         thinkingLevelMap: catalog?.thinkingLevelMap,
       };
     case "cloudflare":
-      if (config.model === AUTO_ROUTER_MODEL_ID) {
-        // The gateway's cross-provider OpenAI-compat layer, the only API the Auto Router serves.
-        // Thinking stays off: the routed model is unknown until the response arrives.
-        return {
-          id: config.model,
-          name: "Auto Router",
-          api: "openai-completions",
-          provider: "cloudflare-ai-gateway",
-          baseUrl: `${gatewayUrl}/compat`,
-          reasoning: false,
-          input: ["text", "image"],
-          cost: ZERO_COST,
-          ...window,
-          compat: {supportsStore: false, supportsDeveloperRole: false},
-        };
-      }
       // Workers AI's own OpenAI-compatible endpoint, exposed through the gateway's workers-ai
       // route. This is Workers AI's native chat API (the same surface as its direct
       // /accounts/{id}/ai/v1 REST endpoint), not the gateway's cross-provider /compat layer.
@@ -403,6 +393,21 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         // requests are otherwise sent no effort at all.
         ...(config.reasoning !== undefined ? { thinkingLevelMap: catalog?.thinkingLevelMap } : {}),
         compat: workersAiCompat(catalog),
+      };
+    case "cloudflare-auto-router":
+      // Auto Router answers on the gateway's /compat route in Chat Completions format whichever
+      // model it picks, so the descriptor claims only what every candidate has: text and image
+      // input, and no reasoning levels.
+      return {
+        id: config.model,
+        name: catalog?.name ?? config.model,
+        api: "openai-completions",
+        provider: "cloudflare-auto-router",
+        baseUrl: `${gatewayUrl}/compat`,
+        reasoning: false,
+        input: ["text", "image"],
+        cost: AUTO_ROUTER_COST,
+        ...window,
       };
     default:
       return undefined;
@@ -565,14 +570,9 @@ function makeHandle(args: HandleArgs): ModelHandle {
       // `lastResponse`, but not this.
       let received: ModelHandle["lastResponse"];
       const startedAt = Date.now();
-      const sessionId = options.sessionId ?? args.sessionAffinity;
       // This request as sent, and when, if prompt caching is on.
       let sent: { payload: unknown; at: number } | undefined;
       const headers: ProviderHeaders = {
-        // Pins the Auto Router's choice for the rest of a turn (its session affinity).
-        ...(args.model.id === AUTO_ROUTER_MODEL_ID && sessionId !== undefined
-            ? { "cf-aig-session-id": sessionId }
-            : {}),
         ...args.headers,
         ...options.headers,
         ...(args.gatewayMetadata
@@ -600,12 +600,13 @@ function makeHandle(args: HandleArgs): ModelHandle {
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
-        sessionId,
+        sessionId: options.sessionId ?? args.sessionAffinity,
         onResponse: async (response, responseModel) => {
           const routedModel = getHeader(response.headers, "cf-aig-routed-model");
           received = {
             status: response.status,
             aiGatewayLogId: getHeader(response.headers, "cf-aig-log-id"),
+            routedModel,
             ...(routedModel
                 ? {
                     routing: {
@@ -786,6 +787,11 @@ function signGeminiFunctionCalls(model: Model<Api>, payload: unknown): object | 
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  // Before upstream added the "cloudflare-auto-router" provider, this fork stored the Auto Router
+  // as a Workers AI model; such stored configs keep working as upstream's.
+  if (config.provider === "cloudflare" && config.model === AUTO_ROUTER_MODEL_ID) {
+    config = { ...config, provider: "cloudflare-auto-router" };
+  }
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -834,6 +840,7 @@ function getModelViaUserGateway(
       "cf-aig-authorization": `Bearer ${userGateway.apiKey}`,
       Authorization: null,
       "x-api-key": null,
+      ...autoRouterHeaders(config, sessionAffinity),
     },
     gatewayMetadata: metadata,
     sessionAffinity,
@@ -854,6 +861,26 @@ function getModelViaUserGateway(
  * recognizes and strips it rather than treating it as a BYOK provider key.
  */
 const CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL = "cloudflare-gateway-binding";
+
+// The headers that steer Auto Router, for its model alone: the pool (see AutoRouterPool), and the
+// chat as the router's session, so a turn's requests stay with one model and its prompt cache. An
+// empty pool is refused rather than sent, since it would leave the router nothing to pick.
+function autoRouterHeaders(config: AiModelConfig, sessionAffinity?: string): ProviderHeaders {
+  if (config.provider !== "cloudflare-auto-router") return {};
+  const pool = config.autoRouterPool;
+  const headers: ProviderHeaders =
+      sessionAffinity !== undefined ? { "cf-aig-session-id": sessionAffinity } : {};
+  if (pool === undefined) return headers;
+  const names = "models" in pool
+      ? pool.models
+      : pool.providers.flatMap(provider => AUTO_ROUTER_PROVIDER_NAMES[provider]?.header ?? []);
+  if (names.length === 0) {
+    throw new Error("Auto Router has no models to pick from: enable another provider on this " +
+        "deployment, or list models of one that is on.");
+  }
+  const header = "models" in pool ? "cf-aig-allowed-models" : "cf-aig-allowed-providers";
+  return { ...headers, [header]: names.join(",") };
+}
 
 /**
  * `Ai#fetch` exists at runtime but @cloudflare/workers-types' `Ai` doesn't declare it, so the
@@ -937,6 +964,7 @@ function getModelViaGateway(
         `Bearer ${binding ? CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL : gwConfig.apiToken}`,
     Authorization: null,
     "x-api-key": null,
+    ...autoRouterHeaders(config, options.sessionAffinity),
   };
   const gatewayBase =
       `https://gateway.ai.cloudflare.com/v1/${gwConfig.accountId}`;
@@ -992,9 +1020,6 @@ function directAuth(config: AiModelConfig, keyHeader: string): Pick<HandleArgs, 
 
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
 function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
-  if (config.provider === "cloudflare" && config.model === AUTO_ROUTER_MODEL_ID) {
-    throw new Error("The Auto Router is only available through AI Gateway.");
-  }
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {
@@ -1123,6 +1148,8 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         ...directAuth(config, "Authorization"),
         sessionAffinity,
       });
+    case "cloudflare-auto-router":
+      throw new Error("The Auto Router model runs only through an AI Gateway.");
     default:
       config.provider satisfies never;
       throw new Error(`Unknown provider "${config.provider}".`);
@@ -1162,33 +1189,44 @@ export function getDecisionModel(env: Cloudflare.Env, config: AiModelConfig,
         { apiKey: config.apiToken, headers: config.extraHeaders });
   }
   const metadata = buildMetadata(initiator, metadataContext);
+  // pi's System One transport POSTs {model, input} as Workers AI's REST API takes them and reads
+  // back the REST envelope; both gateway routes take the bare input and return the bare result.
+  // pi requires a key, which goes unsent.
+  const piInput = async (init?: RequestInit) =>
+      (await new Response(init?.body).json<{ input: Record<string, unknown> }>()).input;
   const binding = gwConfig.bindingFor(config.provider);
   if (binding) {
     // The gateway's passthrough refuses /run even with the binding's identity, so binding
-    // requests take the binding's own run(), which reaches the same gateway. pi's System One
-    // transport POSTs {model, input} as Workers AI's REST API takes them and reads back the REST
-    // envelope; run() takes and returns the bare values. pi requires a key, which goes unsent.
+    // requests take the binding's own run(), which reaches the same gateway.
     return modelAt(catalog.baseUrl, {
       apiKey: CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL,
-      fetch: async (_url, init) => {
-        const { model, input } = JSON.parse(init!.body as string);
-        const result = await binding.run(model, input, { gateway: { id: gwConfig.gateway, metadata } });
-        return Response.json({ success: true, result });
-      },
+      fetch: async (_url, init) => Response.json({ success: true, result: await binding.run(
+          config.model, await piInput(init), { gateway: { id: gwConfig.gateway, metadata } }) }),
     });
   }
-  // Unlike the chat route, /run wants a Workers AI credential as `Authorization`, and a request
-  // sending this token there is refused even when the token grants Workers AI. Until AI Gateway
-  // authenticates /run as it does chat, this route fails, so the docs have such deployments
-  // disable decision models.
-  return modelAt(
-      `https://gateway.ai.cloudflare.com/v1/${gwConfig.accountId}/${gwConfig.gateway}/workers-ai`, {
-        apiKey: gwConfig.apiToken,
+  // Over HTTPS the gateway supplies Workers AI's credential only to a request that names the model
+  // in the path and carries no `Authorization`, which it would otherwise forward to Workers AI as
+  // the credential. A failure goes back to pi as is, for its retries and error message.
+  const gatewayUrl =
+      `https://gateway.ai.cloudflare.com/v1/${gwConfig.accountId}/${gwConfig.gateway}`;
+  return modelAt(catalog.baseUrl, {
+    apiKey: CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL,
+    fetch: async (_url, init) => {
+      const response = await fetch(`${gatewayUrl}/workers-ai/run/${config.model}`, {
+        method: "POST",
         headers: {
+          "content-type": "application/json",
           "cf-aig-authorization": `Bearer ${gwConfig.apiToken}`,
           "cf-aig-metadata": JSON.stringify(metadata),
         },
+        body: JSON.stringify(await piInput(init)),
+        signal: init?.signal,
       });
+      return response.ok
+          ? Response.json({ success: true, result: await response.json() })
+          : response;
+    },
+  });
 }
 
 // =======================================================================================
@@ -1201,18 +1239,29 @@ export type AiModelGatekeeperProps = {
 };
 
 /**
- * Throws if the deployment no longer lets a model binding run its model. A session starts on each
- * call of the binding, so a binding minted before an admin disabled its gateway model stops working
- * at its next call. While users may not add their own models, so does a binding for any other
- * model: one a user added, or one the admin added and removed.
+ * The config a model binding runs with: the one it was minted with, except that the Auto Router
+ * model's pool is the deployment's current one, as the pool is the admin's spend policy rather
+ * than the binding's to keep. Throws if the deployment no longer lets the binding run its model.
+ * A session starts on each call of the binding, so a binding minted before an admin disabled its
+ * gateway model stops working at its next call. While users may not add their own models, so does
+ * a binding for any other model: one a user added, or one the admin added and removed.
  */
-async function refuseRevokedModel(env: Cloudflare.Env, props: AiModelGatekeeperProps) {
+async function bindingConfig(
+    env: Cloudflare.Env, props: AiModelGatekeeperProps): Promise<AiModelConfig> {
   let models = await getGatewayModels(env);
-  if (models?.get(props.config.model)?.provider === props.config.provider) {
-    models.refuseDisabled(props.config.model);
-  } else {
+  let { autoRouterPool, ...config } = props.config;
+  if (models?.get(config.model)?.provider !== config.provider) {
+    // Never a user's own model, so the deployment stopped offering it; without its pool it would
+    // run on the gateway's default one.
+    if (config.provider === "cloudflare-auto-router") {
+      throw new Error("The Auto Router model is no longer offered on this deployment.");
+    }
     models?.refuseUserModel(props.displayName);
+    return config;
   }
+  models.refuseDisabled(config.model);
+  let pool = models.runConfig(config.model)?.autoRouterPool;
+  return pool ? { ...config, autoRouterPool: pool } : config;
 }
 
 export class LanguageModelGatekeeper
@@ -1247,8 +1296,7 @@ export class LanguageModelGatekeeper
       : Promise<LanguageModelBinding> {
     // A binding makes one-shot calls, which ask for no reasoning level. Without the level it was
     // minted with, its model is described as one with none set, whatever the admin has set since.
-    let { reasoning, ...config } = this.ctx.props.config;
-    await refuseRevokedModel(this.env, this.ctx.props);
+    let { reasoning, ...config } = await bindingConfig(this.env, this.ctx.props);
     let model = getModel(this.env, config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
     });
@@ -1319,8 +1367,8 @@ export class DecisionModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<DecisionModelBinding> {
-    let { config, initiator, metadata } = this.ctx.props;
-    await refuseRevokedModel(this.env, this.ctx.props);
+    let { initiator, metadata } = this.ctx.props;
+    let config = await bindingConfig(this.env, this.ctx.props);
     return new DecisionModelBindingImpl(getDecisionModel(this.env, config, initiator, metadata));
   }
 

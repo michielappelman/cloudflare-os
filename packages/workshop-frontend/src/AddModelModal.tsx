@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Dialog, Button, Input, Select, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, AiModelProvider, AiGatewayInfo, RedactedAiModelConfig, SUGGESTED_MODELS, modelKind, AUTO_ROUTER_MODEL_ID } from '@gadgets/workshop-shared/api'
+import { AiChatAuthorInfo, AiModelProvider, AiGatewayInfo, RedactedAiModelConfig, SUGGESTED_MODELS, modelKind } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { ExtraHeadersEditor } from './features/ai-models/ExtraHeadersEditor'
@@ -40,6 +40,8 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
   ollama: '(optional)',
+  // Never shown: Auto Router's one model is the deployment's (see AiGatewayInfo.enabledProviders).
+  'cloudflare-auto-router': '',
 }
 
 // Providers whose client can send no API key at all, so a proxy that extra headers authenticate
@@ -84,14 +86,14 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
   const providerOrder = Object.keys(SUGGESTED_MODELS) as AiModelProvider[]
 
   for (const provider of providerOrder) {
+    // Auto Router's one model is the deployment's; it runs only through a gateway.
+    if (provider === 'cloudflare-auto-router') continue
     if (enabledProviders && !enabledProviders.has(provider)) continue
 
     // In gateway mode, suggested models are already built-in, so don't list them.
     if (!gatewayMode) {
       for (const [modelId, model] of Object.entries(SUGGESTED_MODELS[provider])) {
         if (model.hidden || (chatModelsOnly && model.kind === 'decision')) continue
-        // The Auto Router only exists behind an AI Gateway.
-        if (modelId === AUTO_ROUTER_MODEL_ID) continue
         options.push({
           value: encodeSelection(provider, modelId),
           label: model.name,
