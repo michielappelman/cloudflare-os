@@ -124,38 +124,8 @@ export class CloudflareApiClient {
       throw new CloudflareApiError(400, `${operation.id} returns binary data, which this ` +
         "connection does not read.");
     }
-    const url = CloudflareApiClient.url(operation, params);
-    const token = await this.#getToken();
-    if (!token) {
-      throw new CloudflareApiError(401, "The Cloudflare connection has expired. Reconnect it in " +
-        "Cloudflare OS and try again.");
-    }
-    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-    if (bodyText !== undefined) headers["Content-Type"] = "application/json";
-    const response = await this.#fetch(url, { method: operation.method, headers, body: bodyText });
-
-    const declared = Number(response.headers.get("Content-Length") ?? "0");
-    if (declared > MAX_RESPONSE_BYTES) {
-      await response.body?.cancel();
-      throw new CloudflareApiError(413, "The response is too large to return. Narrow it with " +
-        "filters or pagination.");
-    }
-    const text = await response.text();
-    if (text.length > MAX_RESPONSE_BYTES) {
-      throw new CloudflareApiError(413, "The response is too large to return. Narrow it with " +
-        "filters or pagination.");
-    }
-
-    const isJson = (response.headers.get("Content-Type") ?? "").includes("json");
-    let parsed: unknown = undefined;
-    if (isJson && text) {
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        throw new CloudflareApiError(502, "Cloudflare returned malformed JSON.");
-      }
-    }
-
+    const { response, text, parsed } = await this.#fetchText(
+      CloudflareApiClient.url(operation, params), operation.method, bodyText);
     if (!response.ok) throw providerFailure(response.status, parsed);
     if (parsed === undefined) {
       return { status: response.status, result: text === "" ? null : text };
@@ -173,5 +143,58 @@ export class CloudflareApiClient {
       };
     }
     return { status: response.status, result: parsed };
+  }
+
+  /**
+   * Sends one GraphQL Analytics query, already scoped by `scopeGraphqlQuery`. GraphQL reports most
+   * failures as `errors` in a 200 response; those are returned, not thrown.
+   */
+  async graphql(query: string, variables: Record<string, unknown>):
+      Promise<{ data: unknown; errors?: unknown[] }> {
+    const { response, parsed } = await this.#fetchText(
+      `${API_BASE}/graphql`, "POST", JSON.stringify({ query, variables }));
+    if (!response.ok) throw providerFailure(response.status, parsed);
+    const body = parsed as { data?: unknown; errors?: unknown } | undefined;
+    if (!body || typeof body !== "object") {
+      throw new CloudflareApiError(502, "Cloudflare returned an invalid GraphQL response.");
+    }
+    return {
+      data: body.data ?? null,
+      ...(Array.isArray(body.errors) && body.errors.length > 0 ? { errors: body.errors } : {}),
+    };
+  }
+
+  async #fetchText(url: string, method: string, bodyText?: string):
+      Promise<{ response: Response; text: string; parsed: unknown }> {
+    const token = await this.#getToken();
+    if (!token) {
+      throw new CloudflareApiError(401, "The Cloudflare connection has expired. Reconnect it in " +
+        "Cloudflare OS and try again.");
+    }
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (bodyText !== undefined) headers["Content-Type"] = "application/json";
+    const response = await this.#fetch(url, { method, headers, body: bodyText });
+
+    const declared = Number(response.headers.get("Content-Length") ?? "0");
+    if (declared > MAX_RESPONSE_BYTES) {
+      await response.body?.cancel();
+      throw new CloudflareApiError(413, "The response is too large to return. Narrow it with " +
+        "filters or pagination.");
+    }
+    const text = await response.text();
+    if (text.length > MAX_RESPONSE_BYTES) {
+      throw new CloudflareApiError(413, "The response is too large to return. Narrow it with " +
+        "filters or pagination.");
+    }
+
+    let parsed: unknown = undefined;
+    if ((response.headers.get("Content-Type") ?? "").includes("json") && text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new CloudflareApiError(502, "Cloudflare returned malformed JSON.");
+      }
+    }
+    return { response, text, parsed };
   }
 }

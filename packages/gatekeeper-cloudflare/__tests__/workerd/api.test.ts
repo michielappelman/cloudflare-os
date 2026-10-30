@@ -19,6 +19,8 @@ let userObjectId: string;
 let facets = 0;
 let record: Record<string, unknown>;
 let sent: Array<{ method: string; url: string; body?: string }>;
+/** The zone tag the fake GraphQL endpoint puts on every row it returns. */
+let graphqlRowTag: string;
 
 function ok(result: unknown, resultInfo?: unknown): Response {
   return Response.json({ success: true, errors: [], messages: [], result, result_info: resultInfo });
@@ -42,6 +44,11 @@ function fakeCloudflare() {
       ]);
     }
     if (method === "GET" && path === `/zones/${ZONE}/dns_records`) return ok([record], { page: 1 });
+    if (method === "POST" && path === "/graphql") {
+      return Response.json({ data: { viewer: { zones: [
+        { httpRequests1dGroups: [{ sum: { requests: 42 } }], _cfosScopeTag: graphqlRowTag },
+      ] } } });
+    }
     if (method === "POST" && path === `/zones/${ZONE}/dns_records`) {
       return ok({ id: "new", ...JSON.parse(init.body as string) });
     }
@@ -69,6 +76,11 @@ function call(facet: string, binding: CloudflareApiGatekeeperProps, target: stri
   return hooks().apiCall(facet, binding, "call", target, request) as unknown as Promise<ApiCallOutcome>;
 }
 
+function graphql(facet: string, binding: CloudflareApiGatekeeperProps, query: string,
+  variables?: Record<string, unknown>): Promise<ApiCallOutcome> {
+  return hooks().apiCall(facet, binding, "graphql", query, variables) as unknown as Promise<ApiCallOutcome>;
+}
+
 function actionResult(facet: string, binding: CloudflareApiGatekeeperProps, actionId: number):
     Promise<ApiCallOutcome> {
   return hooks().apiCall(facet, binding, "getActionResult", actionId) as unknown as Promise<ApiCallOutcome>;
@@ -85,6 +97,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   record = { id: RECORD, type: "A", name: "www.example.com", content: "192.0.2.1" };
+  graphqlRowTag = ZONE;
   sent = [];
   fakeCloudflare();
 });
@@ -195,5 +208,46 @@ describe("Cloudflare API binding", () => {
       path: { zone_id: FOREIGN_ZONE },
     });
     expect(other.error).toMatch(/example.com only/);
+  });
+
+  describe("GraphQL Analytics", () => {
+    const query = `query ($z: String!) { viewer { zones(filter: { zoneTag: $z }) {
+      httpRequests1dGroups(limit: 1) { sum { requests } } } } }`;
+
+    it("sends the rewritten query and returns verified data as an observation", async () => {
+      const outcome = await graphql(`api-${facets++}`, props(), query, { z: ZONE });
+
+      expect(outcome.error).toBeUndefined();
+      expect(outcome.result).toEqual({
+        data: { viewer: { zones: [{ httpRequests1dGroups: [{ sum: { requests: 42 } }] }] } },
+      });
+      const post = JSON.parse(sent.find(r => r.url.endsWith("/graphql"))!.body!);
+      expect(post.query).toContain(`zoneTag: "${ZONE}"`);
+      expect(post.variables).toEqual({});
+      expect(outcome.observations).toHaveLength(1);
+      expect(outcome.observations[0]!.fields?.find(f => f.label === "Zones")).toMatchObject({
+        items: ["example.com"],
+      });
+    });
+
+    it("refuses another account's zone before anything is queried", async () => {
+      const outcome = await graphql(`api-${facets++}`, props(), query, { z: FOREIGN_ZONE });
+
+      expect(outcome.error).toMatch(/not in account/);
+      expect(sent.some(r => r.url.endsWith("/graphql"))).toBe(false);
+    });
+
+    it("withholds a response that carries a row from another zone", async () => {
+      graphqlRowTag = FOREIGN_ZONE;
+      const outcome = await graphql(`api-${facets++}`, props(), query, { z: ZONE });
+
+      expect(outcome.error).toMatch(/outside this connection/);
+      expect(outcome.observations).toHaveLength(0);
+    });
+
+    it("needs the analytics product on a narrowed binding", async () => {
+      const outcome = await graphql(`api-${facets++}`, props({ products: ["dns"] }), query, { z: ZONE });
+      expect(outcome.error).toMatch(/analytics/);
+    });
   });
 });

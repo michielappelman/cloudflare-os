@@ -189,10 +189,32 @@ API bindings use observer strategy A: a gadget holding one can only be opened by
 connected it. A member's Cloudflare role may cover fewer products than the binding, and there is no one
 check that proves a collaborator could read everything the binding has read.
 
+### GraphQL Analytics
+
+`graphql(query, variables)` and `describeGraphqlType(name?)` reach the
+[GraphQL Analytics API](https://developers.cloudflare.com/analytics/graphql-api/) (`POST /graphql`).
+For product narrowing it counts as the `analytics` product. The REST checks do not apply, because a
+GraphQL query names the zones and accounts it reads in its own text, so `src/api-graphql.ts` parses
+it (graphql-js, parser and printer only) and holds it to a narrow shape:
+
+- One `query` operation, no fragments. The top level contains only `viewer`, or only `__schema` /
+  `__type` for exploring the schema. Under `viewer` only `zones`, `accounts`, `budget` and
+  `__typename` are allowed.
+- `zones` needs `filter: { zoneTag }` or `{ zoneTag_in }`, as literals or variables, and nothing
+  else. `OR`, `_neq` and similar operators, other conditions, arguments and directives are
+  refused. A zone binding may leave the filter out. `accounts` may leave it out, must otherwise
+  name the bound account, and is refused on a zone binding (account datasets span every zone).
+- Each scope filter is **rewritten** into a literal the gatekeeper wrote. Variables that only fed
+  the scope are removed, so nothing caller-controlled reaches it. Before the query is sent, every
+  zone tag is checked against the bound account, as for REST.
+- Each scoped selection gets a hidden `_cfosScopeTag: zoneTag` (or `accountTag`) field. Every row
+  of the response must carry an allowed tag, and the field is stripped. One foreign or untagged
+  row withholds the whole response, the same rule the Worker observability binding applies.
+
+The observation records the rewritten query and variables exactly as sent, with the zone names.
+
 ### Not yet
 
-- GraphQL Analytics (its queries name accounts and zones in the query text, which needs parsing to
-  scope).
 - Uploads and binary downloads.
 - Account-owned API tokens as an alternative to OAuth.
 

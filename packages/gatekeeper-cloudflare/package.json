@@ -16,7 +16,8 @@
     "@gadgets/observability": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "catalog:",
-    "capnweb-validate": "catalog:"
+    "capnweb-validate": "catalog:",
+    "graphql": "17.0.2"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "catalog:",
