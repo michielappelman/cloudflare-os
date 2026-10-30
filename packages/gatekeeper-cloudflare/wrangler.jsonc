@@ -41,6 +41,12 @@
       "new_sqlite_classes": [
         "CloudflareObservabilityGatekeeper"
       ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "CloudflareApiGatekeeper"
+      ]
     }
   ]
 }

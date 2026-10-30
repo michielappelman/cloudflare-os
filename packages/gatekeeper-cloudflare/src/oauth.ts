@@ -10,7 +10,7 @@ const CF_OAUTH_TOKEN_URL = "https://dash.cloudflare.com/oauth2/token";
 import {
   createPkce, isInvalidGrant, OAuthClient, OAuthResponseError, type OAuthTokens,
 } from "@gadgets/gatekeeper-kit/oauth-client";
-import { observabilityScopesForResources } from "./resources.js";
+import { apiScopesForResources, observabilityScopesForResources } from "./resources.js";
 
 /**
  * Scopes for the AI Gateway billing/BYOK flow: read account details and route inference
@@ -26,9 +26,16 @@ export const BILLING_SCOPES = [
   "account-settings.read",
 ];
 
-/** Persistent billing scopes plus the explicitly selected gadget resources. */
-export function persistentScopesForResources(resourceUrlPatterns?: string[]): string[] {
-  return [...BILLING_SCOPES, ...observabilityScopesForResources(resourceUrlPatterns)];
+/**
+ * Persistent billing scopes plus the explicitly selected gadget resources. `apiEnabled` says whether
+ * the deployment offers the API resources (see `apiScopesForResources`).
+ */
+export function persistentScopesForResources(resourceUrlPatterns?: string[], apiEnabled = false): string[] {
+  return [
+    ...BILLING_SCOPES,
+    ...observabilityScopesForResources(resourceUrlPatterns),
+    ...apiScopesForResources(resourceUrlPatterns, apiEnabled),
+  ];
 }
 
 /**

@@ -1,6 +1,6 @@
 # Gatekeeper Cloudflare
 
-This package provides Cloudflare OAuth integration for Gadgets. It serves three purposes:
+This package provides Cloudflare OAuth integration for Gadgets. It serves four purposes:
 
 - **Sign-in:** when `cloudflare` is in the deployment's `AUTH_GATEKEEPERS` allowlist, "Continue with
   Cloudflare" appears on the login page. The grant reads the account email (verified by Cloudflare,
@@ -17,6 +17,9 @@ This package provides Cloudflare OAuth integration for Gadgets. It serves three 
   defensively discard foreign-service events. Distributed trace summaries are account-only because
   their names, timing, services, and counts describe the whole cross-service trace; a Worker binding
   can still retrieve its own events for a known trace ID.
+- **Cloudflare API (opt-in):** gadgets can read and change an account's or a zone's configuration
+  through the whole Cloudflare REST API, the same surface the `cf` CLI covers. Reads are observations;
+  every change waits for approval. See [Cloudflare API resource](#cloudflare-api-resource).
 
 Observability connections request `workers-observability.read`. The OAuth client must allow that
 scope or Cloudflare will omit/reject it. Existing billing-only connections can add the grant when the
@@ -107,6 +110,91 @@ list — an account past the first page simply cannot be picked, with nothing to
 account picker's substring match also stays client-side: `name` is the only documented server-side
 filter and whether it matches exactly or by substring is not specified, so pushing it down would trade
 a visible truncation for an invisible one.
+
+## Cloudflare API resource
+
+Off by default. Set `ENABLE_API_RESOURCE=true` on the gatekeeper Worker to offer it, and make sure the
+deployment's OAuth client allows every scope in `API_SCOPES` (`src/resources.ts`): Cloudflare refuses
+an authorization that asks for a scope the client may not request. The flag also decides whether a
+"connect all resources" flow asks for those scopes, so existing deployments are unaffected until it is
+set.
+
+### Bindings
+
+| Binding | Resource URL | Reaches |
+|---|---|---|
+| Account | `https://dash.cloudflare.com/<accountId>` | `/accounts/<accountId>/…`, `/zones/<id>/…` for zones that account owns, `/zones` (pinned to the account), Radar and `/ips` |
+| Zone | `https://dash.cloudflare.com/<accountId>/<zone name>` | `/zones/<that zone id>/…`, Radar and `/ips` |
+| Narrowed (either) | `…#products=dns,rulesets&access=read` | Only the listed products; `access=read` refuses every change |
+
+`/user`, `/memberships`, `/accounts` (the list), organizations and every other path outside an account
+are refused. An unknown fragment key is an error, not ignored, so a newer configurator's narrowing
+can never be silently dropped. Suggested binding names are `CLOUDFLARE_API` and `CLOUDFLARE_ZONE_API`;
+the session type is `CloudflareApiSession` (`src/api-types.d.ts`).
+
+### The operation catalog
+
+`src/api-spec/` is compiled from Cloudflare's public OpenAPI document
+([cloudflare/api-schemas](https://github.com/cloudflare/api-schemas)) by
+`scripts/generate-api-spec.ts`, pinned to the commit in `src/api-spec/source.json`, and committed so
+builds never reach the network. Refresh it with `pnpm api-spec:update` (or `--ref <sha>` to move the
+pin). `operations.json` (~1.2 MB) is the index; `schemas.txt` (~6 MB) holds parameters and
+TypeScript-like body and result shapes, and is parsed on the first `describeOperation()`.
+
+Every request resolves to a catalog operation before anything else happens, by `id`, by its `cf`-style
+command (`dns.records.create`), or by method and concrete path. A request that resolves to none is
+refused: nothing is forwarded to `api.cloudflare.com` that the catalog does not describe. Only JSON
+request bodies are sent; uploads (multipart, octet-stream) and binary responses are refused for now.
+
+### Tiers
+
+`src/api-tiers.ts` classifies each operation; the rules are few and fail closed.
+
+| Tier | Rule | Approval |
+|---|---|---|
+| `read` | GET, plus a reviewed list of query POSTs (`logs.query`, `analytics-engine.sql.query`, …) | Observation |
+| `write` | Any other change | Approval; auto-approvable per product (`cloudflare.api.<product>`) |
+| `destructive` | DELETE, or Cloudflare's CLI asks to confirm (`x-forge-require-confirmation`) | Always a person; Cloudflare's warning is shown |
+| `privileged` | Members, roles, API tokens, IdPs, service tokens, OAuth clients, billing, registrar | Always a person |
+| `blocked` | Returns a live credential (tunnel run token, temporary R2 keys, Pages upload token) | Refused |
+
+`d1.query` is deliberately not a read: its SQL may write. `__tests__/api-catalog.test.ts` fails when
+a spec refresh renames a command one of the lists names.
+
+### How a change runs
+
+1. `prepare()` checks the operation against the binding (product, tier, path scope), fills
+   `account_id` (and `zone_id` on a zone binding), and confirms a `zone_id` belongs to the bound
+   account by reading the zone from Cloudflare (cached for five minutes). `POST /zones` must name
+   the bound account in its body.
+2. For PUT, PATCH and DELETE on a resource with a GET on the same path, the current state is read and
+   its SHA-256 digest stored; the approval shows it next to the request body.
+3. The approval shows the full URL, every path parameter, the query and the request body verbatim.
+   Nothing is simulated, so `awaitDecision` is set.
+4. On approval, `applyAction()` runs step 1 again (a zone can change accounts while a change waits),
+   re-reads the resource and refuses if its digest moved, then sends the stored body text unchanged.
+   The claim is persisted before sending: a 4xx is recorded as retryable, anything else as an
+   unknown outcome that is never replayed.
+5. `getActionResult()` returns the redacted response and records it as an observation.
+
+### Credentials in responses
+
+`src/api-redact.ts` replaces `client_secret`, `secret`, `token`, `password`, `private_key` and similar
+fields anywhere in a response, and `value` for API-token operations, before the caller or an approval
+sees them. Operations whose whole answer is a credential are blocked rather than redacted.
+
+### Sharing
+
+API bindings use observer strategy A: a gadget holding one can only be opened by the person who
+connected it. A member's Cloudflare role may cover fewer products than the binding, and there is no one
+check that proves a collaborator could read everything the binding has read.
+
+### Not yet
+
+- GraphQL Analytics (its queries name accounts and zones in the query text, which needs parsing to
+  scope).
+- Uploads and binary downloads.
+- Account-owned API tokens as an alternative to OAuth.
 
 ## Setting Up Cloudflare OAuth Credentials
 

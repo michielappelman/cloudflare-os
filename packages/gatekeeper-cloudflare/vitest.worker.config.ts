@@ -27,6 +27,7 @@ export default defineConfig({
             className: "CloudflareObservabilityGatekeeper",
             useSQLite: true,
           },
+          API_GATEKEEPER: { className: "CloudflareApiGatekeeper", useSQLite: true },
           // The gatekeeper DO reads `ctx.props`, and a `DurableObjectClass` carrying props is only
           // reachable through `ctx.facets` -- so the tests drive it from a hook Durable Object,
           // exactly as the overseer does in production, rather than a plain namespace binding.

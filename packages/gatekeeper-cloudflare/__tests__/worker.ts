@@ -6,9 +6,12 @@
 // instantiates a gatekeeper in production.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import type { GatekeeperUserVerifier, GitCache, GitObjectType, GitOid }
-  from "@gadgets/workshop-shared/gatekeeper";
-import type { CloudflareObservabilityGatekeeper } from "../src/cloudflare.js";
+import type {
+  ActionDescription, GatekeeperUserVerifier, GitCache, GitObjectType, GitOid, ObservationDescription,
+} from "@gadgets/workshop-shared/gatekeeper";
+import type { CloudflareApiGatekeeper, CloudflareObservabilityGatekeeper } from "../src/cloudflare.js";
+import type { CloudflareApiGatekeeperProps } from "../src/api-gatekeeper.js";
+import type { CloudflareApiRequest, CloudflareApiResult } from "../src/api-types.js";
 
 export { default } from "../src/cloudflare.js";
 export * from "../src/cloudflare.js";
@@ -22,6 +25,8 @@ type GatekeeperProps = {
 export type TestExports = {
   CloudflareObservabilityGatekeeper(options: { props: GatekeeperProps }):
     DurableObjectClass<CloudflareObservabilityGatekeeper>;
+  CloudflareApiGatekeeper(options: { props: CloudflareApiGatekeeperProps }):
+    DurableObjectClass<CloudflareApiGatekeeper>;
   TestConnectCallback(options: { props: { label: string } }): Fetcher<TestConnectCallback>;
 };
 
@@ -72,7 +77,66 @@ export class TestConnectCallback extends WorkerEntrypoint<Env, { label: string }
   }
 }
 
+/** Records what a session reports to the approval queue. */
+class RecordingQueue extends RpcTarget {
+  readonly observations: ObservationDescription[] = [];
+  readonly submissions: Array<{ id: number; description: ActionDescription }> = [];
+
+  async authorizeObservation(description: ObservationDescription): Promise<void> {
+    this.observations.push(description);
+  }
+
+  async submitAction(id: number, description: ActionDescription): Promise<void> {
+    this.submissions.push({ id, description });
+  }
+}
+
+/** What one API session call produced. */
+export type ApiCallOutcome = {
+  result?: CloudflareApiResult;
+  error?: string;
+  observations: ObservationDescription[];
+  submissions: Array<{ id: number; description: ActionDescription }>;
+};
+
 export class TestHooks extends DurableObject<Env> {
+  #apiGatekeeper(facetName: string, props: CloudflareApiGatekeeperProps) {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return this.ctx.facets.get<CloudflareApiGatekeeper>(facetName, () => ({
+      class: exports.CloudflareApiGatekeeper({ props }),
+    }));
+  }
+
+  /** Runs one session method against an API binding with a recording approval queue. */
+  async apiCall(
+    facetName: string, props: CloudflareApiGatekeeperProps,
+    method: "call" | "getActionResult", target: string | number, request?: CloudflareApiRequest,
+  ): Promise<ApiCallOutcome> {
+    const queue = new RecordingQueue();
+    const session = await this.#apiGatekeeper(facetName, props).startSession(new RpcStub(queue) as never);
+    try {
+      const result = method === "call"
+        ? await session.call(target as string, request)
+        : await session.getActionResult(target as number);
+      return { result, observations: queue.observations, submissions: queue.submissions };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+        observations: queue.observations, submissions: queue.submissions,
+      };
+    }
+  }
+
+  /** Approves an action, returning the error message or null. */
+  async apiApply(facetName: string, props: CloudflareApiGatekeeperProps, action: number): Promise<string | null> {
+    try {
+      await this.#apiGatekeeper(facetName, props).applyAction(action, new RpcStub(new TestGitCache()));
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   #gatekeeper(facetName: string, props: GatekeeperProps) {
     const exports = this.ctx.exports as unknown as TestExports;
     return this.ctx.facets.get<CloudflareObservabilityGatekeeper>(facetName, () => ({
