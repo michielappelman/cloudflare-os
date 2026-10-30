@@ -119,3 +119,31 @@ export async function listAccounts(token: string): Promise<CloudflareAccount[]> 
   }
   return accounts;
 }
+
+export interface CloudflareZone {
+  zoneId: string;
+  zoneName: string;
+  status: string;
+}
+
+const ZONE_SEARCH_LIMIT = 50;
+
+/**
+ * Zones of one account whose name contains `query`, at most one page. Requires `zone.read`.
+ * Cloudflare's `name=contains:` filter does the matching, since an account can hold thousands.
+ */
+export async function listZones(token: string, accountId: string, query: string): Promise<CloudflareZone[]> {
+  const params = new URLSearchParams({
+    "account.id": accountId,
+    per_page: String(ZONE_SEARCH_LIMIT),
+    order: "name",
+  });
+  const needle = query.trim().toLowerCase();
+  if (needle) params.set("name", `contains:${needle}`);
+  const envelope = await cfRequest<Array<{ id: string; name: string; status: string }>>(
+    token, `/zones?${params}`,
+  );
+  return (envelope?.result ?? []).map(zone => ({
+    zoneId: zone.id, zoneName: zone.name, status: zone.status,
+  }));
+}

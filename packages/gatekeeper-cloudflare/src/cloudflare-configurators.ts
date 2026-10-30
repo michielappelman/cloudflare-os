@@ -1,10 +1,12 @@
 import { RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import { listAccounts } from "./cloudflare-api.js";
+import { listAccounts, listZones } from "./cloudflare-api.js";
+import { apiCatalog, API_PRODUCTS } from "./api-spec-data.js";
 import { CloudflareObservabilityApi } from "./observability-api.js";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import type {
   CloudflareAccountConfiguratorRpc,
+  CloudflareApiConfiguratorRpc,
   CloudflareWorkerConfiguratorRpc,
 } from "./configurator/cloudflare-configurator-types.js";
 
@@ -55,5 +57,30 @@ export class CloudflareWorkerConfiguratorUI extends CloudflareAccountConfigurato
         typeof value.value === "string" && (!needle || value.value.toLowerCase().includes(needle)))
       .slice(0, OPTION_LIMIT)
       .map(value => ({ value: value.value, title: value.value }));
+  }
+}
+
+@validateRpc()
+export class CloudflareApiConfiguratorUI extends CloudflareAccountConfiguratorUI
+    implements CloudflareApiConfiguratorRpc {
+  async listZones(accountId: string, query: string): Promise<ConfiguratorUIOption[]> {
+    const token = await tokenFor(this);
+    if (!token) return [];
+    return (await listZones(token, accountId, query)).map(zone => ({
+      value: zone.zoneName, title: zone.zoneName, meta: zone.status,
+    }));
+  }
+
+  async listProducts(): Promise<ConfiguratorUIOption[]> {
+    const counts = new Map<string, number>();
+    for (const operation of apiCatalog().all()) {
+      counts.set(operation.product, (counts.get(operation.product) ?? 0) + 1);
+    }
+    return [...counts].toSorted(([a], [b]) => a.localeCompare(b)).map(([product, count]) => ({
+      value: product,
+      title: product,
+      ...(API_PRODUCTS[product] ? { subtitle: API_PRODUCTS[product] } : {}),
+      meta: `${count} operations`,
+    }));
   }
 }

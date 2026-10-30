@@ -18,7 +18,7 @@ import {
   OBSERVABILITY_RESOURCES,
   ACCOUNT_OBSERVABILITY_RESOURCE,
   WORKER_OBSERVABILITY_RESOURCE,
-  grantedObservabilityResourcePatterns,
+  grantedResourcePatterns,
   accountObservabilityUrl,
   workerObservabilityUrl,
   parseObservabilityResourceUrl,
@@ -27,14 +27,20 @@ import { CloudflareObservabilityApi, deniesAccess } from "./observability-api.js
 import { CloudflareObservabilitySessionImpl } from "./observability-session.js";
 import {
   CloudflareAccountConfiguratorUI,
+  CloudflareApiConfiguratorUI,
   CloudflareWorkerConfiguratorUI,
 } from "./cloudflare-configurators.js";
+import { API_RESOURCES, ZONE_API_RESOURCE, ACCOUNT_API_RESOURCE, parseApiResourceUrl } from "./api-scope.js";
+import API_CONFIGURATOR_HTML from "./generated/cloudflare-api-configurator-ui.txt";
+import API_TYPES_CODE from "./api-types.txt";
 import ACCOUNT_CONFIGURATOR_HTML from "./generated/cloudflare-account-configurator-ui.txt";
 import WORKER_CONFIGURATOR_HTML from "./generated/cloudflare-worker-configurator-ui.txt";
 import type { CloudflareObservabilitySession } from "./types.js";
 import { VENDOR_ID } from "./vendor.js";
 import TYPES_CODE from "./types.txt";
 import { obsContext } from "./observability.js";
+
+export { CloudflareApiGatekeeper } from "./api-gatekeeper.js";
 
 const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare", vendorId: VENDOR_ID,
@@ -96,7 +102,31 @@ type Env = Cloudflare.Env & {
   BASE_URL?: string;
   CLIENT_ID?: string;
   CLIENT_SECRET?: string;
+  /**
+   * `"true"` offers the Cloudflare API resources (whole-API access to an account or zone). Off by
+   * default because they request `API_SCOPES`, which the deployment's OAuth client must allow.
+   */
+  ENABLE_API_RESOURCE?: string;
 };
+
+function apiEnabled(env: Env): boolean {
+  return env.ENABLE_API_RESOURCE === "true";
+}
+
+/** The resource types this deployment offers. */
+function supportedResources(env: Env): SupportedResource[] {
+  return apiEnabled(env) ? [...OBSERVABILITY_RESOURCES, ...API_RESOURCES] : OBSERVABILITY_RESOURCES;
+}
+
+/** Whether `url` is an API resource URL (account or zone) rather than an observability one. */
+function isApiResourceUrl(url: string): boolean {
+  try {
+    const segments = new URL(url).pathname.split("/").filter(Boolean);
+    return segments.length === 1 || (segments.length === 2 && segments[1]!.includes("."));
+  } catch {
+    return false;
+  }
+}
 
 function getBaseUrl(env: Env) {
   return stripTrailingSlashes(env.BASE_URL || "http://localhost:8787/gatekeeper/cloudflare");
@@ -181,7 +211,9 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://cloudflare.com",
       logo: { url: CLOUDFLARE_LOGO_URL },
       color: "#fbece0",
-      tagline: "Sign in, use AI Gateway, and inspect Workers Observability",
+      tagline: apiEnabled(this.env)
+        ? "Sign in, use AI Gateway, inspect Workers Observability, and manage accounts and zones"
+        : "Sign in, use AI Gateway, and inspect Workers Observability",
       description:
           "Sign in with your Cloudflare account and use your own Cloudflare AI Gateway credits for " +
           "usage beyond the free tier. You can also connect Workers Observability to inspect logs, " +
@@ -201,18 +233,18 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     const authOnly = options?.scopes === "auth";
     const scopes = authOnly
       ? AUTH_SCOPES
-      : persistentScopesForResources(options?.resourceUrlPatterns);
+      : persistentScopesForResources(options?.resourceUrlPatterns, apiEnabled(this.env));
     await this.ctx.exports.UserAccount.get(userObjectId)
         .setCallback(callback, initiationNonce, scopes, authOnly);
     return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return OBSERVABILITY_RESOURCES;
+    return supportedResources(this.env);
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    return TYPES_CODE;
+    return apiEnabled(this.env) ? `${TYPES_CODE}\n${API_TYPES_CODE}` : TYPES_CODE;
   }
 }
 
@@ -469,7 +501,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       displayName: identity?.displayName,
       uniqueName: identity?.email,
       avatar: { url: CLOUDFLARE_LOGO_URL },
-      grantedResourceUrlPatterns: grantedObservabilityResourcePatterns(grantedScopes),
+      grantedResourceUrlPatterns: grantedResourcePatterns(grantedScopes),
     };
   }
 
@@ -482,12 +514,12 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
   async ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}> {
     const account = this.#account();
-    const grantedPatterns = new Set(grantedObservabilityResourcePatterns(await account.getGrantedScopes()));
+    const grantedPatterns = new Set(grantedResourcePatterns(await account.getGrantedScopes()));
     if (resourceUrlPatterns.every(pattern => grantedPatterns.has(pattern))) return {};
 
     const union = [...new Set([...grantedPatterns, ...resourceUrlPatterns])];
     const initiationNonce = generateNonce();
-    await account.prepareReconnect(initiationNonce, persistentScopesForResources(union));
+    await account.prepareReconnect(initiationNonce, persistentScopesForResources(union, apiEnabled(this.env)));
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 
@@ -496,13 +528,23 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return OBSERVABILITY_RESOURCES;
+    return supportedResources(this.env);
   }
 
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
   }> {
+    if (isApiResourceUrl(url)) {
+      if (!apiEnabled(this.env)) throw new Error("This deployment does not offer the Cloudflare API resource.");
+      const binding = parseApiResourceUrl(url);
+      return {
+        class: this.ctx.exports.CloudflareApiGatekeeper({
+          props: { userObjectId: this.ctx.props.userObjectId, ...binding },
+        }),
+        resource: binding.zoneName !== undefined ? ZONE_API_RESOURCE : ACCOUNT_API_RESOURCE,
+      };
+    }
     const parsed = parseObservabilityResourceUrl(url);
     return {
       class: this.ctx.exports.CloudflareObservabilityGatekeeper({
@@ -524,6 +566,12 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {
         iframeHtml: WORKER_CONFIGURATOR_HTML,
         ui: new RpcStub(new CloudflareWorkerConfiguratorUI(getToken)),
+      };
+    }
+    if (apiEnabled(this.env) && API_RESOURCES.some(r => r.urlPattern === resourceUrlPattern)) {
+      return {
+        iframeHtml: API_CONFIGURATOR_HTML,
+        ui: new RpcStub(new CloudflareApiConfiguratorUI(getToken)),
       };
     }
     throw new Error(`Unsupported Cloudflare resource configurator type: ${resourceUrlPattern}`);
