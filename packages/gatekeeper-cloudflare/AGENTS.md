@@ -73,3 +73,7 @@ grant.
   renames one. Review new read-only POSTs individually: a "query" can write (`d1.query`).
 - Gated by `ENABLE_API_RESOURCE`, including the scopes a "connect all" requests, so a deployment whose
   OAuth client does not allow `API_SCOPES` keeps working.
+- GraphQL (`api-graphql.ts`) cannot reuse the path checks, so it parses the query, rewrites each
+  `zones` / `accounts` filter to a literal, and tags every scoped selection so each response row is
+  checked. Widening the accepted shape (fragments, directives, more filter keys) needs the same
+  rewrite-and-verify treatment; `__tests__/api-graphql.test.ts` holds the bypass attempts.

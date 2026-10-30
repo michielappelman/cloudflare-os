@@ -110,6 +110,14 @@ export interface CloudflareApiScope {
   readOnly: boolean;
 }
 
+/** Outcome of a GraphQL Analytics query. */
+export interface CloudflareGraphqlResult {
+  /** The query's data, as GraphQL returns it. May be partial when `errors` is present. */
+  data: unknown;
+  /** GraphQL errors, e.g. an unknown field or a dataset the plan does not include. */
+  errors?: Array<{ message: string; path?: Array<string | number>; extensions?: Record<string, unknown> }>;
+}
+
 /** A product and how many of its operations this connection can call. */
 export interface CloudflareApiProduct {
   name: string;
@@ -190,6 +198,42 @@ export interface CloudflareApiSession {
 
   /** The outcome of a change that `call()` returned as `"pending"`. */
   getActionResult(actionId: number): Promise<CloudflareApiResult>;
+
+  /**
+   * Runs a query against the GraphQL Analytics API (traffic, security events, Workers and other
+   * product analytics). The query must have this shape:
+   *
+   * - one `query` operation, without fragments;
+   * - at the top level only `viewer` (or, to explore the schema, only `__schema` / `__type`);
+   * - under `viewer` only `zones`, `accounts` and `budget`;
+   * - `zones(filter: { zoneTag: "…" })` or `zones(filter: { zoneTag_in: [...] })` naming zones of
+   *   this connection, as literals or variables. On a zone connection the filter may be left out;
+   * - `accounts` may leave out its filter (it is this connection's account), and is not available
+   *   on a zone connection.
+   *
+   * Other filters (time ranges, hostnames, ...) go on the datasets inside, as usual. Example:
+   *
+   * ```ts
+   * const { data, errors } = await cf.graphql(`
+   *   query ($zone: String!, $since: Time!) {
+   *     viewer { zones(filter: { zoneTag: $zone }) {
+   *       httpRequestsAdaptiveGroups(limit: 10, filter: { datetime_geq: $since },
+   *                                  orderBy: [count_DESC]) {
+   *         count dimensions { clientCountryName }
+   *       }
+   *     } }
+   *   }`, { zone: zone.id, since: "2026-10-29T00:00:00Z" });
+   * ```
+   *
+   * Throws when the query has another shape or names a zone outside this connection.
+   */
+  graphql(query: string, variables?: Record<string, unknown>): Promise<CloudflareGraphqlResult>;
+
+  /**
+   * Fields, arguments, input fields and enum values of one GraphQL Analytics type. Without a name,
+   * the root query type; follow field types from there (`viewer` → zone and account datasets).
+   */
+  describeGraphqlType(name?: string): Promise<unknown>;
 
   /** Looks up a zone by name. Throws when it is not in this connection's account or zone. */
   findZone(name: string): Promise<{ id: string; name: string; status: string; plan?: string }>;

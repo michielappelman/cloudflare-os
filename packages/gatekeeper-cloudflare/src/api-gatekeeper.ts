@@ -21,6 +21,9 @@ import {
   type ApiQueryValue, type ApiResponse,
 } from "./api-client.js";
 import { describeChange, productLabel, type DescribedCall } from "./api-describe.js";
+import {
+  ROOT_TYPE_QUERY, scopeGraphqlQuery, typeQuery, verifyGraphqlData, type ScopedGraphql,
+} from "./api-graphql.js";
 import { redactResult } from "./api-redact.js";
 import {
   apiResourceUrl, bindingReaches, operationRefusal, pathScopeOf, type ApiBinding,
@@ -37,6 +40,8 @@ import { VENDOR_ID } from "./vendor.js";
 const logger = obsContext.createLogger({ component: "gatekeeper.cloudflare.api", vendorId: VENDOR_ID });
 
 const ZONE_CACHE_TTL_MS = 5 * 60 * 1000;
+/** The product a narrowed binding must include to use the GraphQL Analytics API. */
+export const GRAPHQL_PRODUCT = "analytics";
 const MAX_PARAM_LENGTH = 512;
 
 /** Props the user entrypoint passes for one binding; see `parseApiResourceUrl`. */
@@ -390,6 +395,55 @@ export class CloudflareApiHost {
       response.resultInfo ? JSON.stringify(response.resultInfo) : undefined,
     );
     logger.info("approved change applied", { event: "api.apply.applied", status: response.status });
+  }
+
+  /** Product narrowing treats the GraphQL Analytics API as the `analytics` product. */
+  #requireAnalytics(): void {
+    const products = this.binding.products;
+    if (products && !products.includes(GRAPHQL_PRODUCT)) {
+      invalid(`This connection is limited to ${products.join(", ")}; GraphQL Analytics belongs to ` +
+        `${GRAPHQL_PRODUCT}.`);
+    }
+  }
+
+  /**
+   * Runs a GraphQL Analytics query after scoping it to the binding (see `api-graphql.ts`), and
+   * confirms every zone it names belongs to the bound account before it is sent.
+   */
+  async graphql(query: string, variables?: Record<string, unknown>): Promise<{
+    data: unknown; errors?: unknown[]; scoped: ScopedGraphql; zones: string[];
+  }> {
+    this.#requireAnalytics();
+    const binding = this.binding;
+    const zoneId = binding.zoneName !== undefined ? (await this.boundZone()).id : undefined;
+    const scoped = scopeGraphqlQuery(query, variables, {
+      accountId: binding.accountId, ...(zoneId ? { zoneId } : {}),
+    });
+    const zones: string[] = [];
+    for (const tag of scoped.zoneTags) zones.push((await this.zoneInScope(tag)).name);
+    const response = await this.client.graphql(scoped.query, scoped.variables);
+    return {
+      data: verifyGraphqlData(response.data, scoped.checks),
+      ...(response.errors ? { errors: response.errors } : {}),
+      scoped, zones,
+    };
+  }
+
+  /** Introspects one GraphQL Analytics type, or the root query type when `name` is omitted. */
+  async graphqlType(name?: string): Promise<unknown> {
+    this.#requireAnalytics();
+    let typeName = name;
+    if (typeName === undefined) {
+      const root = await this.client.graphql(ROOT_TYPE_QUERY, {});
+      typeName = (root.data as { __schema?: { queryType?: { name?: string } } } | null)
+        ?.__schema?.queryType?.name;
+      if (!typeName) throw new Error("Cloudflare did not report the GraphQL root type.");
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(typeName)) invalid("Pass a GraphQL type name.");
+    const response = await this.client.graphql(typeQuery(), { name: typeName });
+    const type = (response.data as { __type?: unknown } | null)?.__type;
+    if (!type) throw new Error(`No GraphQL Analytics type named ${typeName}.`);
+    return type;
   }
 
   /** The bound zone of a zone binding, resolved once from its name. */

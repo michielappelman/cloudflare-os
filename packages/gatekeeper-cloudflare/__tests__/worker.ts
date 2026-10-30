@@ -11,7 +11,9 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { CloudflareApiGatekeeper, CloudflareObservabilityGatekeeper } from "../src/cloudflare.js";
 import type { CloudflareApiGatekeeperProps } from "../src/api-gatekeeper.js";
-import type { CloudflareApiRequest, CloudflareApiResult } from "../src/api-types.js";
+import type {
+  CloudflareApiRequest, CloudflareApiResult, CloudflareGraphqlResult,
+} from "../src/api-types.js";
 
 export { default } from "../src/cloudflare.js";
 export * from "../src/cloudflare.js";
@@ -93,7 +95,7 @@ class RecordingQueue extends RpcTarget {
 
 /** What one API session call produced. */
 export type ApiCallOutcome = {
-  result?: CloudflareApiResult;
+  result?: CloudflareApiResult | CloudflareGraphqlResult;
   error?: string;
   observations: ObservationDescription[];
   submissions: Array<{ id: number; description: ActionDescription }>;
@@ -110,14 +112,17 @@ export class TestHooks extends DurableObject<Env> {
   /** Runs one session method against an API binding with a recording approval queue. */
   async apiCall(
     facetName: string, props: CloudflareApiGatekeeperProps,
-    method: "call" | "getActionResult", target: string | number, request?: CloudflareApiRequest,
+    method: "call" | "getActionResult" | "graphql", target: string | number,
+    request?: CloudflareApiRequest | Record<string, unknown>,
   ): Promise<ApiCallOutcome> {
     const queue = new RecordingQueue();
     const session = await this.#apiGatekeeper(facetName, props).startSession(new RpcStub(queue) as never);
     try {
       const result = method === "call"
-        ? await session.call(target as string, request)
-        : await session.getActionResult(target as number);
+        ? await session.call(target as string, request as CloudflareApiRequest)
+        : method === "graphql"
+          ? await session.graphql(target as string, request as Record<string, unknown>)
+          : await session.getActionResult(target as number);
       return { result, observations: queue.observations, submissions: queue.submissions };
     } catch (error) {
       return {

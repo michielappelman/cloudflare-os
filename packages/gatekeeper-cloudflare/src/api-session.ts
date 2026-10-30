@@ -8,7 +8,7 @@ import { RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import type { ApprovalQueue } from "@gadgets/workshop-shared/gatekeeper";
 import { codeSpan } from "@gadgets/gatekeeper-kit/action-description";
-import { describeRead } from "./api-describe.js";
+import { describeGraphqlRead, describeRead } from "./api-describe.js";
 import type { CloudflareApiHost, PreparedCall } from "./api-gatekeeper.js";
 import { bindingReaches } from "./api-scope.js";
 import { API_PRODUCTS } from "./api-spec-data.js";
@@ -22,6 +22,7 @@ import type {
   CloudflareApiResult,
   CloudflareApiScope,
   CloudflareApiSession,
+  CloudflareGraphqlResult,
 } from "./api-types.js";
 
 const DEFAULT_LIST_ITEMS = 1000;
@@ -252,6 +253,26 @@ export class CloudflareApiSessionImpl extends RpcTarget implements CloudflareApi
         };
       }
     }
+  }
+
+  async graphql(query: string, variables?: Record<string, unknown>): Promise<CloudflareGraphqlResult> {
+    const { data, errors, scoped, zones } = await this.#host.graphql(query, variables);
+    await this.#queue.authorizeObservation(describeGraphqlRead(
+      this.#host.target, scoped.query, scoped.variables, zones,
+      scoped.introspection ? "read the schema" : errors ? "returned data with errors" : "returned data",
+    ));
+    return { data, ...(errors ? { errors: errors as CloudflareGraphqlResult["errors"] } : {}) };
+  }
+
+  async describeGraphqlType(name?: string): Promise<unknown> {
+    const type = await this.#host.graphqlType(name);
+    await this.#queue.authorizeObservation({
+      title: "Cloudflare: GraphQL Analytics schema",
+      description: `Read the GraphQL Analytics schema ${name ? "for one type" : "root type"} on the ` +
+        `Cloudflare ${this.#host.target}.`,
+      ...(name ? { fields: [{ kind: "inline" as const, label: "Type", value: name }] } : {}),
+    });
+    return type;
   }
 
   async findZone(name: string): Promise<{ id: string; name: string; status: string; plan?: string }> {

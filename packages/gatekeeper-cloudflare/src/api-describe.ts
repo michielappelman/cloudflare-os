@@ -93,3 +93,15 @@ export function describeChange(call: DescribedCall, before?: unknown): ActionDes
 export function productLabel(product: string): string {
   return `Change ${product} configuration (Cloudflare API)`;
 }
+
+/** The observation recorded when a GraphQL Analytics query's data is returned. */
+export function describeGraphqlRead(target: string, query: string, variables: Record<string, unknown>,
+    zones: readonly string[], summary: string): ObservationDescription {
+  const built = buildDescription(
+    `Ran a GraphQL Analytics query on the Cloudflare ${target}; ${summary}.`,
+  ).verbatim("Query", query);
+  if (Object.keys(variables).length > 0) built.json("Variables", variables);
+  if (zones.length > 0) built.list("Zones", zones);
+  const { description, fields } = built.finish();
+  return { title: "Cloudflare: GraphQL Analytics query", description, ...(fields ? { fields } : {}) };
+}
