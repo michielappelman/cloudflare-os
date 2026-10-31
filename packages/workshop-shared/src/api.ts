@@ -551,14 +551,28 @@ export interface AuthenticatedApi extends RpcTarget {
   hasPasswordLogin(): Promise<boolean>;
 
   /**
-   * Register one of the user's devices for push: the native app's one-time central device
+   * Register one of the user's devices for push: an older native app's one-time central device
    * registration, or this browser's Web Push subscription. Each registered device gets push; a
    * device that registers again replaces its own subscription. The deployment never receives an
    * APNs device token or Cloudflare account token. A browser's subscription passes through it to
-   * the central notification service, which delivers to an endpoint only for its most recent
-   * registration.
+   * the central notification service under this user's opaque installation-local identity; the
+   * service delivers to an endpoint only for its most recent registration.
    */
   registerNotificationDevice(registration: string | WebPushSubscription): Promise<void>;
+
+  /**
+   * Claim a new native registration using this user's CFOS authorization, not legacy OAuth.
+   * This is separate from `registerNotificationDevice()` because legacy and authorized native
+   * registrations have the same opaque string shape; only the native protocol version identifies
+   * which central exchange is valid.
+   */
+  registerAuthorizedNotificationDevice(deviceRegistrationId: string): Promise<void>;
+
+  /**
+   * Authorize native push enrollment as this CFOS user. The single-use central grant is bound to
+   * this installation and user; it carries no provider token or Dashboard credential.
+   */
+  authorizeNotificationDevice(): Promise<string>;
 
   /**
    * Subscribe while this client can visibly present notifications. Dispose the returned handle
@@ -1179,6 +1193,8 @@ export type AdminSettingsView = {
   banner: BannerConfig;
   /** Accent color hex, or "" for the default theme. */
   accentColor: string;
+  /** The hosts `webFetch` may reach in a workspace that has observed restricted data. */
+  restrictedWebFetchHosts: string[];
   /** Every bound gatekeeper and its resource types, with enabled state (not hidden when disabled). */
   resourceVendors: AdminResourceVendor[];
   /** The blueprints promoted as standard output formats, in menu order (including disabled ones). */
@@ -1353,6 +1369,14 @@ export interface AdminApi {
 
   /** Replace the agent system-prompt instructions. Pass "" to clear. Rejects over MAX_INSTANCE_INSTRUCTIONS_LENGTH. */
   setInstanceInstructions(text: string): Promise<void>;
+
+  /**
+   * Replace the hosts `webFetch` may reach in a workspace that has observed restricted data. Each
+   * entry is an exact host name, so a subdomain needs its own entry. Entries are trimmed and
+   * lowercased, and duplicates and blank entries are dropped. Rejects an entry that is not an ASCII
+   * host name, such as one with a scheme, port, path or wildcard. Resolves to the list as stored.
+   */
+  setRestrictedWebFetchHosts(hosts: string[]): Promise<string[]>;
 
   /**
    * Enable or disable a single gatekeeper resource type, keyed by vendor id + resource urlPattern.
@@ -2336,8 +2360,9 @@ export type WorkspaceMetadata = {
   /**
    * True when the workspace has observed data marked `containsRestrictedData` (see
    * `ObservationDescription`). It can still be shared, with collaborators verified per
-   * gatekeeper (if `ownerInvitesOnly` is also set, only the owner can add them), but can no longer
-   * fetch from the public web, and every action requires manual approval.
+   * gatekeeper (if `ownerInvitesOnly` is also set, only the owner can add them), but its web
+   * fetches reach only the hosts the deployment admin trusts (none by default), and every action
+   * requires manual approval.
    */
   containsRestrictedData?: boolean;
 
