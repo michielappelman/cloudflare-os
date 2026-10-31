@@ -222,6 +222,12 @@
   --app-height: 100dvh;
   --app-top: 0px;
   --app-bottom: 0px;
+  /* The home-indicator inset, which the on-screen keyboard covers while it is up (main.tsx). */
+  --app-safe-bottom: env(safe-area-inset-bottom);
+}
+
+:root[data-keyboard-open] {
+  --app-safe-bottom: 0px;
 }
 
 html,
@@ -247,14 +253,14 @@ body {
   box-sizing: border-box;
   height: var(--app-height);
   padding: env(safe-area-inset-top) env(safe-area-inset-right)
-    env(safe-area-inset-bottom) env(safe-area-inset-left);
+    var(--app-safe-bottom) env(safe-area-inset-left);
 }
 
 .visual-viewport-fixed {
   position: fixed;
   top: calc(var(--app-top) + env(safe-area-inset-top));
   right: env(safe-area-inset-right);
-  bottom: calc(var(--app-bottom) + env(safe-area-inset-bottom));
+  bottom: calc(var(--app-bottom) + var(--app-safe-bottom));
   left: env(safe-area-inset-left);
 }
 
@@ -267,7 +273,7 @@ body {
     body .responsive-dialog {
       top: auto !important;
       right: env(safe-area-inset-right) !important;
-      bottom: calc(var(--app-bottom) + env(safe-area-inset-bottom)) !important;
+      bottom: calc(var(--app-bottom) + var(--app-safe-bottom)) !important;
       left: 50% !important;
       width: calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right)) !important;
       max-width: none !important;

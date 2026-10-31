@@ -59,6 +59,9 @@ async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
 // Anyway, I pulled the connection management out into these globals instead.
 let lastConnectTime: number = 0;
 
+/** Below this many pixels, space under the visual viewport is browser chrome, not a keyboard. */
+const KEYBOARD_MIN_HEIGHT = 120;
+
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 10000;
 // Generous probe deadlines let a slow-but-alive backend settle instead of connect/dispose looping
@@ -203,9 +206,13 @@ function AppWithConnection() {
       const top = viewport?.offsetTop ?? 0;
       document.documentElement.style.setProperty('--app-height', `${height}px`);
       document.documentElement.style.setProperty('--app-top', `${top}px`);
-      document.documentElement.style.setProperty(
-        '--app-bottom',
-        `${Math.max(0, window.innerHeight - top - height)}px`,
+      const bottom = Math.max(0, window.innerHeight - top - height);
+      document.documentElement.style.setProperty('--app-bottom', `${bottom}px`);
+      // The space below the visual viewport is the on-screen keyboard unless the page is pinch-
+      // zoomed. While it is up, the home-indicator inset it covers must not be reserved as well.
+      document.documentElement.toggleAttribute(
+        'data-keyboard-open',
+        bottom > KEYBOARD_MIN_HEIGHT && (viewport?.scale ?? 1) < 1.01,
       );
     };
     updateHeight();

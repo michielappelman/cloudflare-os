@@ -19,3 +19,15 @@
     color: var(--color-kumo-default);
   }
 }
+
+@layer utilities {
+  /* iOS zooms the page when a focused field's text is under 16px, and a zoomed frame overflows
+     the Workshop's dialog sideways and pushes its footer behind the keyboard. The `body` prefix
+     and !important out-rank Kumo's own text-size utilities on its inputs, as the Workshop's
+     responsive dialogs do for theirs. */
+  @media (pointer: coarse) {
+    body :is(input, textarea, select) {
+      font-size: 16px !important;
+    }
+  }
+}

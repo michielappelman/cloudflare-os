@@ -5224,29 +5224,33 @@ function ChatInterface({
       return (
         <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
           <div className="rounded-2xl border border-kumo-brand/40 bg-kumo-brand/10 px-4 py-3">
-            <div className="flex items-start gap-3">
-              <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-tint text-kumo-brand" aria-hidden="true">
-                <ShieldCheck size={20} weight="fill" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                  <span className="min-w-0 truncate font-medium text-kumo-default">
-                    {log.description.title}
-                  </span>
-                  {resourceMeta}
-                </div>
-                {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2" />}
-                <div id={requestId} className={`chat-panel mt-1 pr-1 text-[13px] leading-[18px] text-kumo-subtle ${restricted ? "" : "max-h-[200px] overflow-y-auto"} ${styles.markdownContent}`}>
-                  <MarkdownMessage message={log.description.description} />
-                </div>
-                {hasFields && (
-                  <div id={fieldsId} className={`chat-panel mt-2 pr-1 ${restricted ? "" : "max-h-[360px] overflow-y-auto"}`}>
-                    <ActionFields fields={entryFields(log)} uncapped={restricted} />
+            {/* On a phone the controls take their own row under the request: beside it, they would
+                squeeze the description into a column a few characters wide. */}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+              <div className="flex min-w-0 flex-1 items-start gap-3">
+                <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-tint text-kumo-brand" aria-hidden="true">
+                  <ShieldCheck size={20} weight="fill" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="min-w-0 break-words font-medium text-kumo-default sm:truncate">
+                      {log.description.title}
+                    </span>
+                    {resourceMeta}
                   </div>
-                )}
-                {incomplete && <IncompleteDescriptionNotice id={incompleteId} className="mt-2" />}
+                  {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2" />}
+                  <div id={requestId} className={`chat-panel mt-1 pr-1 text-[13px] leading-[18px] text-kumo-subtle ${restricted ? "" : "max-h-[200px] overflow-y-auto"} ${styles.markdownContent}`}>
+                    <MarkdownMessage message={log.description.description} />
+                  </div>
+                  {hasFields && (
+                    <div id={fieldsId} className={`chat-panel mt-2 pr-1 ${restricted ? "" : "max-h-[360px] overflow-y-auto"}`}>
+                      <ActionFields fields={entryFields(log)} uncapped={restricted} />
+                    </div>
+                  )}
+                  {incomplete && <IncompleteDescriptionNotice id={incompleteId} className="mt-2" />}
+                </div>
               </div>
-              <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
+              <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-1 sm:ml-3 sm:self-center">
                 {actionControls}
               </div>
             </div>
@@ -5639,8 +5643,10 @@ function ChatInterface({
           {(!sidebarMode || sidebarActiveTab === "chat") && (
             <>
               {/* Chat sub-header — hidden in sidebar mode (list is always visible) */}
+              {/* While the keyboard is up on a phone this row only repeats the title above it, so it
+                  gives its height back to the conversation; not while it holds the title editor. */}
               {!sidebarMode && (
-                <div className="flex h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
+                <div className={`flex h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4 ${isEditingTitle ? "" : "max-md:in-data-keyboard-open:hidden"}`}>
                   <WorkshopIconButton
                     onClick={() => onNavigateToChat(null)}
                     className="!h-8 !w-8 flex-shrink-0"
