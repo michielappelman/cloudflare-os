@@ -35,6 +35,19 @@ describe("CloudflareApiClient", () => {
     expect(response).toEqual({ status: 200, result: [{ id: "r1" }], resultInfo: { page: 1, per_page: 1 } });
   });
 
+  it("calls fetch without binding it to the client", async () => {
+    // workerd's fetch throws "Illegal invocation" when called with any receiver but the global
+    // scope; this stand-in fails the same way, so a method-style call is caught here.
+    const strictFetch = function (this: unknown) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+      return Promise.resolve(jsonResponse(200, { success: true, errors: [], result: [] }));
+    } as unknown as typeof fetch;
+    const client = new CloudflareApiClient(async () => "tok", strictFetch);
+    await expect(client.send(op("dns.records.list"), { pathParams: { zone_id: ZONE } }))
+      .resolves.toMatchObject({ status: 200, result: [] });
+    await expect(client.graphql("{ viewer { budget } }", {})).resolves.toBeDefined();
+  });
+
   it("carries Cloudflare's codes and messages on failure", async () => {
     const client = new CloudflareApiClient(async () => "tok", (async () => jsonResponse(400, {
       success: false, errors: [{ code: 9005, message: "Content for A record is invalid." }],
