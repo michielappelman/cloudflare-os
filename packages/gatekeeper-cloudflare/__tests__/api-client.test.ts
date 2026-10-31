@@ -4,7 +4,7 @@ import { ApiCatalog, type ApiOperation } from "../src/api-spec";
 import {
   CloudflareApiClient, CloudflareApiError, encodeBody, provesNotApplied,
 } from "../src/api-client";
-import { describeChange, describeRead } from "../src/api-describe";
+import { changeList, describeChange, describeRead, resourceLabel } from "../src/api-describe";
 import { REDACTED, redactResult } from "../src/api-redact";
 import { tierOf } from "../src/api-tiers";
 
@@ -123,7 +123,7 @@ describe("descriptions", () => {
       descriptionIsComplete: true,
     });
     expect(description.fields?.map(f => f.label)).toEqual(
-      ["Request", "Zone", "Path: zone_id", "Request body"]);
+      ["New values", "Zone", "Request body", "Request", "Path: zone_id"]);
   });
 
   it("never makes destructive or privileged changes auto-approvable", () => {
@@ -138,6 +138,35 @@ describe("descriptions", () => {
     const description = describeChange(call("dns.records.edit", { bodyText: "{}" }), { content: "old" });
     expect(description.fields?.find(f => f.label === "Current state")).toBeDefined();
     expect(description.description).toContain("will not be made");
+  });
+
+  it("leads with the named resource and a field-by-field change list", () => {
+    const before = { id: "r1", type: "A", name: "www.example.com", content: "192.0.2.1", ttl: 1,
+      proxied: true, settings: { ipv4_only: false }, modified_on: "2026-10-01" };
+    const description = describeChange(call("dns.records.edit", {
+      bodyText: JSON.stringify({ content: "192.0.2.99", settings: { ipv4_only: true } }),
+    }), before);
+    expect(description.title).toBe("Update DNS Record: A www.example.com (example.com)");
+    expect(description.description).toMatch(/^\*\*Updates dns record `A www\.example\.com`\*\* in zone example\.com\./);
+    expect(description.fields?.[0]).toEqual({ label: "Changes", kind: "list", items: [
+      'content: "192.0.2.1" → "192.0.2.99"', "settings.ipv4_only: false → true",
+    ] });
+    expect(description.descriptionIsComplete).toBe(true);
+  });
+
+  it("names what a delete removes", () => {
+    const route = { id: "r", pattern: "appelman.se/.well-known/matrix/*", script: "matrix-well-known" };
+    const description = describeChange(call("workers.routes.delete"), route);
+    expect(description.title).toBe("Delete Worker Route: appelman.se/.well-known/matrix/* (example.com)");
+    expect(description.fields?.map(f => f.label)).toContain("Being deleted");
+  });
+
+  it("warns which fields a PUT would leave out", () => {
+    expect(changeList("PUT", { name: "a", content: "x" },
+      { id: "1", name: "a", content: "y", comment: "keep me", modified_on: "t" }))
+      .toEqual(['content: "y" → "x"', 'comment: "keep me" → (not in request; may be reset)']);
+    expect(changeList("POST", { name: "n", ttl: 1 }, undefined)).toEqual(['name: "n"', "ttl: 1"]);
+    expect(resourceLabel(undefined, { pattern: "p/*" })).toBe("p/*");
   });
 
   it("records the request of a read", () => {
