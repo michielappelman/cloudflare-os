@@ -15,6 +15,7 @@ import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
 import { getBackendHost } from './connectHandoff';
 import { useStaleBackendReconnect } from './features/stale-session/useStaleBackendReconnect'
+import { isKeyboardOpen, isTextEntry, tallestHeightFor, type TallestHeights } from './keyboardViewport';
 
 // ---------------------------------------------------------------------------
 // Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
@@ -58,9 +59,6 @@ async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
 //
 // Anyway, I pulled the connection management out into these globals instead.
 let lastConnectTime: number = 0;
-
-/** Below this many pixels, space under the visual viewport is browser chrome, not a keyboard. */
-const KEYBOARD_MIN_HEIGHT = 120;
 
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 10000;
@@ -201,28 +199,37 @@ function AppWithConnection() {
 
   useEffect(() => {
     const viewport = window.visualViewport;
+    const tallest: TallestHeights = new Map();
     const updateHeight = () => {
       const height = viewport?.height ?? window.innerHeight;
       const top = viewport?.offsetTop ?? 0;
       document.documentElement.style.setProperty('--app-height', `${height}px`);
       document.documentElement.style.setProperty('--app-top', `${top}px`);
-      const bottom = Math.max(0, window.innerHeight - top - height);
-      document.documentElement.style.setProperty('--app-bottom', `${bottom}px`);
-      // The space below the visual viewport is the on-screen keyboard unless the page is pinch-
-      // zoomed. While it is up, the home-indicator inset it covers must not be reserved as well.
-      document.documentElement.toggleAttribute(
-        'data-keyboard-open',
-        bottom > KEYBOARD_MIN_HEIGHT && (viewport?.scale ?? 1) < 1.01,
+      document.documentElement.style.setProperty(
+        '--app-bottom',
+        `${Math.max(0, window.innerHeight - top - height)}px`,
       );
+      // While the keyboard is up, the home-indicator inset it covers must not be reserved as well.
+      document.documentElement.toggleAttribute('data-keyboard-open', isKeyboardOpen({
+        tallest: tallestHeightFor(tallest, window.innerWidth, height),
+        height,
+        scale: viewport?.scale ?? 1,
+        textEntryFocused: isTextEntry(document.activeElement),
+      }));
     };
     updateHeight();
     viewport?.addEventListener('resize', updateHeight);
     viewport?.addEventListener('scroll', updateHeight);
     window.addEventListener('resize', updateHeight);
+    // Focus moves without a resize when the keyboard is already up, or as it goes away.
+    document.addEventListener('focusin', updateHeight);
+    document.addEventListener('focusout', updateHeight);
     return () => {
       viewport?.removeEventListener('resize', updateHeight);
       viewport?.removeEventListener('scroll', updateHeight);
       window.removeEventListener('resize', updateHeight);
+      document.removeEventListener('focusin', updateHeight);
+      document.removeEventListener('focusout', updateHeight);
     };
   }, []);
 
