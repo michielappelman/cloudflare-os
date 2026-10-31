@@ -63,6 +63,12 @@
             "CloudflareObservabilityGatekeeper"
           ],
           "tag": "v1"
+        },
+        {
+          "new_sqlite_classes": [
+            "CloudflareApiGatekeeper"
+          ],
+          "tag": "v2"
         }
       ],
       "modules": [
