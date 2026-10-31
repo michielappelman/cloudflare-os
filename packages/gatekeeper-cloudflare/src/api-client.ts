@@ -173,7 +173,10 @@ export class CloudflareApiClient {
     }
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
     if (bodyText !== undefined) headers["Content-Type"] = "application/json";
-    const response = await this.#fetch(url, { method, headers, body: bodyText });
+    // Called as a plain function: invoking the runtime's fetch as a method of this client gives it
+    // the wrong `this`, which workerd rejects with "Illegal invocation".
+    const fetcher = this.#fetch;
+    const response = await fetcher(url, { method, headers, body: bodyText });
 
     const declared = Number(response.headers.get("Content-Length") ?? "0");
     if (declared > MAX_RESPONSE_BYTES) {
