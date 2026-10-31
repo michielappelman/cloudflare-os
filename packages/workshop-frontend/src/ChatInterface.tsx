@@ -6114,50 +6114,55 @@ function ChatInterface({
                               )}
 
                               {showActions && (
-                                <div className={`mt-0.5 -ml-1 flex items-center gap-1 transition-opacity duration-150 ease-out ${
-                                  keepActionsVisible
-                                    ? "opacity-100"
-                                    : "opacity-100 sm:opacity-0 sm:group-hover/agentMessage:opacity-100 sm:group-focus-within/agentMessage:opacity-100"
-                                }`}>
-                                  {hasMessageText && (
-                                    <Tooltip content="Copy message" asChild>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleCopyMessage(msg.message)}
-                                        className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96]"
-                                        aria-label="Copy message"
-                                      >
-                                        <Copy size={15} />
-                                      </button>
+                                // The model badge shares the footer's line rather than taking one of
+                                // its own, but stays visible while the actions fade on desktop.
+                                <div className="mt-0.5 -ml-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                  <div className={`flex items-center gap-1 transition-opacity duration-150 ease-out ${
+                                    keepActionsVisible
+                                      ? "opacity-100"
+                                      : "opacity-100 sm:opacity-0 sm:group-hover/agentMessage:opacity-100 sm:group-focus-within/agentMessage:opacity-100"
+                                  }`}>
+                                    {hasMessageText && (
+                                      <Tooltip content="Copy message" asChild>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleCopyMessage(msg.message)}
+                                          className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96]"
+                                          aria-label="Copy message"
+                                        >
+                                          <Copy size={15} />
+                                        </button>
+                                      </Tooltip>
+                                    )}
+                                    {pendingChange && (() => {
+                                      const label = getDiscardLabel(
+                                        pendingChange.through === lastDurablePendingChange?.sequence,
+                                        pendingChange.createdWorkpieces,
+                                      );
+                                      return (
+                                      <Tooltip content={label} asChild>
+                                        <button
+                                          type="button"
+                                          disabled={isAgentActive}
+                                          onClick={() => handleRevertChanges(pendingChange.revertFrom)}
+                                          className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
+                                          aria-label={label}
+                                        >
+                                          <ArrowUUpLeft size={15} />
+                                        </button>
+                                      </Tooltip>
+                                      );
+                                    })()}
+                                    <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                      <span className="px-1 font-mono text-[11px] leading-4 text-kumo-inactive">
+                                        {msg.timestamp.toLocaleTimeString([], {
+                                          hour: "2-digit",
+                                          minute: "2-digit",
+                                        })}
+                                      </span>
                                     </Tooltip>
-                                  )}
-                                  {pendingChange && (() => {
-                                    const label = getDiscardLabel(
-                                      pendingChange.through === lastDurablePendingChange?.sequence,
-                                      pendingChange.createdWorkpieces,
-                                    );
-                                    return (
-                                    <Tooltip content={label} asChild>
-                                      <button
-                                        type="button"
-                                        disabled={isAgentActive}
-                                        onClick={() => handleRevertChanges(pendingChange.revertFrom)}
-                                        className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
-                                        aria-label={label}
-                                      >
-                                        <ArrowUUpLeft size={15} />
-                                      </button>
-                                    </Tooltip>
-                                    );
-                                  })()}
-                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                                    <span className="px-1 font-mono text-[11px] leading-4 text-kumo-inactive">
-                                      {msg.timestamp.toLocaleTimeString([], {
-                                        hour: "2-digit",
-                                        minute: "2-digit",
-                                      })}
-                                    </span>
-                                  </Tooltip>
+                                  </div>
+                                  {entry.routings && <RoutedModelBadge routings={entry.routings} />}
                                 </div>
                               )}
                             </div>
@@ -6205,7 +6210,7 @@ function ChatInterface({
                               </div>
                             )}
 
-                            {entry.routings && <RoutedModelBadge routings={entry.routings} />}
+                            {entry.routings && !showActions && <RoutedModelBadge routings={entry.routings} />}
                           </div>
                             );
                           })()
