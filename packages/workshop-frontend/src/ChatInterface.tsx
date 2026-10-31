@@ -5566,7 +5566,7 @@ function ChatInterface({
               : undefined}
           />
           {/* Reserve the same height as the token/cost row to avoid layout shift. */}
-          <div aria-hidden className="min-h-[1rem]" />
+          <div aria-hidden className="min-h-[1rem] max-md:in-data-keyboard-open:hidden" />
         </div>
       </div>
     </div>
@@ -6662,8 +6662,9 @@ function ChatInterface({
                     })()}
                   />
 
-                  {/* Token / cost summary. */}
-                  <div className="-mt-1 flex min-h-[1.25rem] items-start justify-end gap-4 px-4 pb-1 font-mono text-[11px] leading-4 text-kumo-inactive">
+                  {/* Token / cost summary; on a phone it gives its row to the conversation while the
+                      keyboard is up. */}
+                  <div className="-mt-1 flex min-h-[1.25rem] items-start justify-end gap-4 px-4 pb-1 font-mono text-[11px] leading-4 text-kumo-inactive max-md:in-data-keyboard-open:hidden">
                     {currentChatMetadata?.totalTokens != null && (
                       <span>
                         {currentChatMetadata.totalTokens.toLocaleString()} tokens

@@ -12,6 +12,14 @@ type UseComposerEditorLayoutOptions = {
   maxRows: number;
 };
 
+// Phone-width screens, where a second empty line costs the conversation more than it helps the
+// draft; the composer still grows with its text.
+const COMPACT_QUERY = "(max-width: 767px)";
+
+/** The rows the composer starts at: one on a phone, the caller's minimum elsewhere. */
+export const startingRows = (minRows: number): number =>
+  typeof window !== "undefined" && window.matchMedia?.(COMPACT_QUERY).matches ? 1 : minRows;
+
 export const useComposerEditorLayout = ({
   textareaRef,
   wrapperRef,
@@ -57,7 +65,7 @@ export const useComposerEditorLayout = ({
     const lineHeight = parseFloat(styles.lineHeight) || parseFloat(styles.fontSize) * 1.5;
     const verticalPadding = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
     const verticalBorder = parseFloat(styles.borderTopWidth) + parseFloat(styles.borderBottomWidth);
-    const minimumHeight = lineHeight * minRows + verticalPadding + verticalBorder;
+    const minimumHeight = lineHeight * startingRows(minRows) + verticalPadding + verticalBorder;
     const maximumHeight = lineHeight * maxRows + verticalPadding + verticalBorder;
     textarea.style.height =
       `${Math.min(Math.max(textarea.scrollHeight, minimumHeight), maximumHeight)}px`;
@@ -88,5 +96,5 @@ export const useComposerEditorLayout = ({
     measureUrlLineOffset();
   }, [activeTextOffset, text]);
 
-  return { resizeTextarea, syncMirrorScroll, urlLineOffset };
+  return { resizeTextarea, syncMirrorScroll, urlLineOffset, rows: startingRows(minRows) };
 };

@@ -308,6 +308,7 @@ export const ChatComposer = ({
     resizeTextarea,
     syncMirrorScroll,
     urlLineOffset,
+    rows,
   } = useComposerEditorLayout({
     textareaRef: composerTextareaRef,
     wrapperRef,
@@ -866,7 +867,7 @@ export const ChatComposer = ({
                       : "Ask a follow-up…"
               }
               autoFocus={autoFocus}
-              rows={minRows}
+              rows={rows}
               onPaste={(e) => {
                 const files = Array.from(e.clipboardData.items)
                   .filter((item) => item.kind === "file")
