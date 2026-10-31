@@ -10,6 +10,17 @@ import type {
 // in step.
 const ORIGIN = "https://dash.cloudflare.com";
 const ZONE_PATTERN = `${ORIGIN}/:accountId/:zoneName`;
+const ACCOUNT_ID = /^[a-f\d]{32}$/i;
+const ZONE_NAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
+const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function safeDecode(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return "";
+  }
+}
 
 function selectedProducts(values: CloudflareApiConfiguratorValues): string[] {
   return [...new Set((values.products ?? "").split(",").map(p => p.trim()).filter(Boolean))].toSorted();
@@ -21,17 +32,28 @@ export default {
     access: "change",
   },
 
+  // The host may pass the type's URL pattern itself (`…/:accountId`) rather than a concrete URL, so
+  // only values that are real account ids, zone names and product names are taken; anything else
+  // leaves the field empty instead of seeding a search that can never match.
   initialValuesFromResourceUrl({ resourceUrl }) {
-    const url = new URL(resourceUrl);
-    const [accountId, zoneName] = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    let url: URL;
+    try {
+      url = new URL(resourceUrl);
+    } catch {
+      return {};
+    }
+    if (url.origin !== ORIGIN) return {};
+    const [accountId, zoneName] = url.pathname.split("/").filter(Boolean).map(safeDecode);
+    if (!accountId || !ACCOUNT_ID.test(accountId)) return {};
+    const zone = zoneName && ZONE_NAME.test(zoneName.toLowerCase()) ? zoneName.toLowerCase() : null;
     const params = new URLSearchParams(url.hash.slice(1));
-    const products = params.get("products");
+    const products = (params.get("products") ?? "").split(",").filter(p => PRODUCT.test(p)).join(",");
     return {
-      accountId: accountId ?? null,
-      scope: zoneName ? "zone" : "account",
-      zoneName: zoneName ?? null,
+      accountId: accountId.toLowerCase(),
+      scope: zone ? "zone" : "account",
+      zoneName: zone,
       productMode: products ? "choose" : "all",
-      products: products ?? null,
+      products: products || null,
       access: params.get("access") === "read" ? "read" : "change",
     };
   },
