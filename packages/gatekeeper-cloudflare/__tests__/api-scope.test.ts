@@ -64,6 +64,21 @@ describe("API resource URLs", () => {
     expect(accountUrl).toBe(apiResourceUrl({ accountId: ACCOUNT, readOnly: false }));
   });
 
+  it("prefills nothing from a URL pattern or other non-concrete URL", async () => {
+    for (const resourceUrl of [
+      ACCOUNT_API_RESOURCE.urlPattern, ZONE_API_RESOURCE.urlPattern, "not a url",
+      "https://example.com/0123456789abcdef0123456789abcdef", `https://dash.cloudflare.com/%E0%A4%A`,
+    ]) {
+      expect(await accountApiConfigurator.initialValuesFromResourceUrl!({
+        resourceUrl, resourceUrlPattern: ACCOUNT_API_RESOURCE.urlPattern, ui: noUi,
+      }), resourceUrl).toEqual({});
+    }
+    expect(await accountApiConfigurator.initialValuesFromResourceUrl!({
+      resourceUrl: `https://dash.cloudflare.com/${ACCOUNT}/:zoneName#products=dns,:x`,
+      resourceUrlPattern: ZONE_API_RESOURCE.urlPattern, ui: noUi,
+    })).toMatchObject({ accountId: ACCOUNT, scope: "account", zoneName: null, products: "dns" });
+  });
+
   it("matches the patterns the OAuth scope mapping knows", () => {
     const patterns = [ACCOUNT_API_RESOURCE.urlPattern, ZONE_API_RESOURCE.urlPattern];
     expect(grantedResourcePatterns(["zone.read"])).toEqual(patterns);
