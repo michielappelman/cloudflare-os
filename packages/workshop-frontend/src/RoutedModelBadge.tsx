@@ -1,4 +1,4 @@
-import { Tooltip } from "@cloudflare/kumo";
+import { Popover } from "@cloudflare/kumo";
 import { ArrowsSplit } from "@phosphor-icons/react";
 import type { AiModelRouting } from "@gadgets/workshop-shared/api";
 
@@ -67,26 +67,29 @@ function RoutingDetails({ routings }: { routings: readonly AiModelRouting[] }) {
   const listed = routings.slice(-MAX_LISTED_REQUESTS);
   const firstIndex = routings.length - listed.length;
   return (
-    <div className="max-w-[340px] space-y-2 py-0.5 text-left">
-      <div className="font-medium">
+    <div className="space-y-2 px-3.5 py-2.5 text-left text-[12px] leading-4">
+      <Popover.Title className="text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
         Auto Router · {routings.length} {routings.length === 1 ? "request" : "requests"}
-      </div>
+      </Popover.Title>
       {firstIndex > 0 && (
-        <div className="opacity-70">{firstIndex} earlier not shown</div>
+        <div className="text-kumo-inactive">{firstIndex} earlier not shown</div>
       )}
-      <ol className="space-y-1.5">
+      <ol className="space-y-2">
         {listed.map((routing, i) => {
           const stats = formatStats(routing);
           return (
-            <li key={firstIndex + i}>
-              <div>
-                <span className="opacity-60">#{firstIndex + i + 1}</span>{" "}
-                <span className="font-mono">{routing.model}</span>
+            <li key={firstIndex + i} className="space-y-0.5">
+              <div className="flex items-baseline gap-1.5 text-kumo-default">
+                <span className="text-kumo-inactive">#{firstIndex + i + 1}</span>
+                <span className="font-medium">{routing.name ?? shortModelName(routing.model)}</span>
               </div>
-              <div className="opacity-80">{describeRoutingReason(routing.reason)}</div>
-              {stats && <div className="opacity-70">{stats}</div>}
+              {routing.name && (
+                <div className="break-all font-mono text-[11px] text-kumo-inactive">{routing.model}</div>
+              )}
+              <div className="text-kumo-subtle">{describeRoutingReason(routing.reason)}</div>
+              {stats && <div className="text-kumo-subtle">{stats}</div>}
               {routing.decisionId && (
-                <div className="truncate font-mono text-[10px] opacity-50">
+                <div className="truncate font-mono text-[10px] text-kumo-inactive">
                   decision {routing.decisionId}
                 </div>
               )}
@@ -100,30 +103,48 @@ function RoutingDetails({ routings }: { routings: readonly AiModelRouting[] }) {
 
 /**
  * Which model(s) AI Gateway's Auto Router picked for the requests behind one transcript row, by the
- * display name recorded with them (else the model ID), with each request's exact model, routing
- * reason, token counts and timing on hover. Renders nothing when no request was routed.
+ * display name recorded with them (else the model ID). Tapping or clicking it opens each request's
+ * name and exact model, routing reason, token counts and timing. Renders nothing when no request
+ * was routed.
  */
 export function RoutedModelBadge({ routings }: { routings: readonly AiModelRouting[] }) {
   if (routings.length === 0) return null;
   const summary = summarizeRoutedModels(routings);
+  // A popover rather than a tooltip: a tooltip opens on hover and focus only, so a tap on a phone
+  // never showed the details.
   return (
-    <Tooltip content={<RoutingDetails routings={routings} />} asChild>
-      <button
-        type="button"
-        className="-ml-0.5 flex max-w-full cursor-default items-center gap-1 rounded-md px-0.5 text-[11px] leading-4 text-kumo-inactive transition-colors hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
-        aria-label={`Routed to ${summary.map(({ model, name }) => name ?? model).join(", ")}`}
-      >
-        <ArrowsSplit size={12} className="shrink-0" aria-hidden="true" />
-        <span className="truncate">
-          {summary.map(({ model, name, count }, i) => (
-            <span key={model}>
-              {i > 0 && " · "}
-              {name ? <span>{name}</span> : <span className="font-mono">{shortModelName(model)}</span>}
-              {count > 1 && <span className="opacity-70"> ×{count}</span>}
+    <Popover>
+      <Popover.Trigger
+        render={
+          <button
+            type="button"
+            className="-ml-0.5 flex max-w-full cursor-pointer items-center gap-1 rounded-md px-0.5 text-[11px] leading-4 text-kumo-inactive transition-colors hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
+            aria-label={`Routed to ${summary.map(({ model, name }) => name ?? model).join(", ")}; show routing details`}
+          >
+            <ArrowsSplit size={12} className="shrink-0" aria-hidden="true" />
+            <span className="truncate">
+              {summary.map(({ model, name, count }, i) => (
+                <span key={model}>
+                  {i > 0 && " · "}
+                  {name ? <span>{name}</span> : <span className="font-mono">{shortModelName(model)}</span>}
+                  {count > 1 && <span className="opacity-70"> ×{count}</span>}
+                </span>
+              ))}
             </span>
-          ))}
-        </span>
-      </button>
-    </Tooltip>
+          </button>
+        }
+      />
+      {/* Kumo renders base-ui's arrow as the popup's first child; hidden, as in the Activity
+          popover, so the panel sits flush. */}
+      <Popover.Content
+        side="top"
+        align="start"
+        sideOffset={6}
+        positionMethod="fixed"
+        className="themed-floating-shadow !z-[1100] !w-[min(340px,calc(100vw-24px))] !min-w-0 max-h-[min(420px,60vh)] overflow-y-auto rounded-lg border border-kumo-line !outline-none bg-kumo-base !p-0 [&>:first-child]:hidden"
+      >
+        <RoutingDetails routings={routings} />
+      </Popover.Content>
+    </Popover>
   );
 }
