@@ -2143,6 +2143,12 @@ export type AiModelRouting = {
   /** The model that served the request, e.g. "anthropic/claude-sonnet-5-5" (`cf-aig-routed-model`). */
   model: string;
 
+  /**
+   * The display name the deployment gives `model`, whatever that model's mode, when it offers
+   * one; resolved when the request is recorded. Absent for a model the deployment doesn't list.
+   */
+  name?: string;
+
   /** Why the router chose it, e.g. "cost_optimal_within_pool" (`cf-aig-routing-reason`). */
   reason?: string;
 

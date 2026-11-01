@@ -116,6 +116,13 @@ export type ModelHandle = {
   aiGatewayLogRoute?: AiGatewayLogRoute;
 
   /**
+   * For the Auto Router, the deployment's display name for a model it routed to (see
+   * GatewayModels.routedModelName), recorded as `AiModelRouting.name`. Set by the caller that
+   * holds the deployment's models; absent elsewhere.
+   */
+  routedModelName?: (model: string) => string | undefined;
+
+  /**
    * Status and AI Gateway log id of the most recent HTTP response observed by `stream`, and for
    * the Auto Router model the gateway model that answered. Reset at the start of every request
    * and set from pi's onResponse callback (which fires only once a response arrives -- an
