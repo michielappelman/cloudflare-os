@@ -30,6 +30,17 @@ describe("RoutedModelBadge helpers", () => {
     ]);
   });
 
+  it("carries the display name recorded with a model, if any request has one", () => {
+    expect(summarizeRoutedModels([
+      routed("anthropic/claude-haiku-5.5"),
+      { ...routed("anthropic/claude-haiku-5.5"), name: "Haiku 5.5" },
+      routed("openai/gpt-6-luna"),
+    ])).toEqual([
+      { model: "anthropic/claude-haiku-5.5", name: "Haiku 5.5", count: 2 },
+      { model: "openai/gpt-6-luna", count: 1 },
+    ]);
+  });
+
   it("labels known routing reasons and passes unknown ones through", () => {
     expect(describeRoutingReason("pinned_by_turn")).toBe("Pinned for this turn");
     expect(describeRoutingReason("something_new")).toBe("something_new");

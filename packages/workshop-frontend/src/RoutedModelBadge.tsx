@@ -30,13 +30,25 @@ export function shortModelName(model: string): string {
   return slash === -1 ? model : model.slice(slash + 1);
 }
 
-/** Distinct routed models in order of first use, with how many requests each served. */
+/**
+ * Distinct routed models in order of first use, with how many requests each served and the
+ * display name recorded with them, if any (recorded routings carry one since the server started
+ * resolving it).
+ */
 export function summarizeRoutedModels(
   routings: readonly AiModelRouting[],
-): { model: string; count: number }[] {
-  const counts = new Map<string, number>();
-  for (const { model } of routings) counts.set(model, (counts.get(model) ?? 0) + 1);
-  return [...counts].map(([model, count]) => ({ model, count }));
+): { model: string; name?: string; count: number }[] {
+  const seen = new Map<string, { model: string; name?: string; count: number }>();
+  for (const { model, name } of routings) {
+    const entry = seen.get(model);
+    if (entry) {
+      entry.count++;
+      entry.name ??= name;
+    } else {
+      seen.set(model, { model, ...(name ? { name } : {}), count: 1 });
+    }
+  }
+  return [...seen.values()];
 }
 
 function formatTokens(tokens: number): string {
@@ -87,9 +99,9 @@ function RoutingDetails({ routings }: { routings: readonly AiModelRouting[] }) {
 }
 
 /**
- * Which model(s) AI Gateway's Auto Router picked for the requests behind one transcript row, with
- * each request's model, routing reason, token counts and timing on hover. Renders nothing when
- * no request was routed.
+ * Which model(s) AI Gateway's Auto Router picked for the requests behind one transcript row, by the
+ * display name recorded with them (else the model ID), with each request's exact model, routing
+ * reason, token counts and timing on hover. Renders nothing when no request was routed.
  */
 export function RoutedModelBadge({ routings }: { routings: readonly AiModelRouting[] }) {
   if (routings.length === 0) return null;
@@ -99,14 +111,14 @@ export function RoutedModelBadge({ routings }: { routings: readonly AiModelRouti
       <button
         type="button"
         className="-ml-0.5 flex max-w-full cursor-default items-center gap-1 rounded-md px-0.5 text-[11px] leading-4 text-kumo-inactive transition-colors hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
-        aria-label={`Routed to ${summary.map(({ model }) => model).join(", ")}`}
+        aria-label={`Routed to ${summary.map(({ model, name }) => name ?? model).join(", ")}`}
       >
         <ArrowsSplit size={12} className="shrink-0" aria-hidden="true" />
         <span className="truncate">
-          {summary.map(({ model, count }, i) => (
+          {summary.map(({ model, name, count }, i) => (
             <span key={model}>
               {i > 0 && " · "}
-              <span className="font-mono">{shortModelName(model)}</span>
+              {name ? <span>{name}</span> : <span className="font-mono">{shortModelName(model)}</span>}
               {count > 1 && <span className="opacity-70"> ×{count}</span>}
             </span>
           ))}
