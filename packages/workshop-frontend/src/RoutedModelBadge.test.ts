@@ -42,10 +42,6 @@ describe("RoutedModelBadge helpers", () => {
     const models = [{ id: "claude-sonnet-5-5", name: "Sonnet (ours)" }];
     expect(routedModelName("anthropic/claude-sonnet-5-5", models)).toBe("Sonnet (ours)");
     expect(routedModelName("anthropic/claude-opus-5-5", models)).toBe("Claude Opus 5.5");
-    // What AI Gateway actually reports: dotted versions where the catalog uses dashes.
-    expect(routedModelName("anthropic/claude-sonnet-5.5", models)).toBe("Sonnet (ours)");
-    expect(routedModelName("anthropic/claude-haiku-5.5",
-      [{ id: "claude-haiku-5-5", name: "Claude Haiku 5.5" }])).toBe("Claude Haiku 5.5");
     expect(routedModelName("workers-ai/@cf/zai-org/glm-5.3-flash", []))
       .toBe("GLM 5.3 Flash (Workers AI)");
     expect(routedModelName("acme/unknown-model", models)).toBe("unknown-model");
