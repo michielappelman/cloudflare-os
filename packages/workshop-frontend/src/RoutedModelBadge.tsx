@@ -1,6 +1,6 @@
 import { Tooltip } from "@cloudflare/kumo";
 import { ArrowsSplit } from "@phosphor-icons/react";
-import type { AiModelRouting } from "@gadgets/workshop-shared/api";
+import { SUGGESTED_MODELS, type AiChatAuthorInfo, type AiModelRouting } from "@gadgets/workshop-shared/api";
 
 // Plain-language labels for AI Gateway's cf-aig-routing-reason values.
 // https://developers.cloudflare.com/ai-gateway/features/auto-router/#routing-reasons
@@ -28,6 +28,25 @@ export function describeRoutingReason(reason: string | undefined): string {
 export function shortModelName(model: string): string {
   const slash = model.indexOf("/");
   return slash === -1 ? model : model.slice(slash + 1);
+}
+
+/** The models a name can come from: the chat's model list (`listModels()`), by ID. */
+export type ModelNames = readonly Pick<AiChatAuthorInfo, "id" | "name">[];
+
+/**
+ * A routed model's display name. The router reports `provider/model-id`; the model ID is the one
+ * the chat's model list and SUGGESTED_MODELS key models by. The list comes first, so an admin's own
+ * name for a model wins; the catalog covers models the list leaves out (hidden or disabled ones
+ * the router can still pick); an unknown model shows its ID.
+ */
+export function routedModelName(model: string, models: ModelNames): string {
+  const id = shortModelName(model);
+  const offered = models.find((entry) => entry.id === id);
+  if (offered) return offered.name;
+  for (const catalog of Object.values(SUGGESTED_MODELS)) {
+    if (Object.hasOwn(catalog, id)) return catalog[id]!.name;
+  }
+  return id;
 }
 
 /** Distinct routed models in order of first use, with how many requests each served. */
@@ -87,11 +106,14 @@ function RoutingDetails({ routings }: { routings: readonly AiModelRouting[] }) {
 }
 
 /**
- * Which model(s) AI Gateway's Auto Router picked for the requests behind one transcript row, with
- * each request's model, routing reason, token counts and timing on hover. Renders nothing when
- * no request was routed.
+ * Which model(s) AI Gateway's Auto Router picked for the requests behind one transcript row, by
+ * display name, with each request's exact model ID, routing reason, token counts and timing on
+ * hover. Renders nothing when no request was routed.
  */
-export function RoutedModelBadge({ routings }: { routings: readonly AiModelRouting[] }) {
+export function RoutedModelBadge({ routings, models }: {
+  routings: readonly AiModelRouting[];
+  models: ModelNames;
+}) {
   if (routings.length === 0) return null;
   const summary = summarizeRoutedModels(routings);
   return (
@@ -99,14 +121,14 @@ export function RoutedModelBadge({ routings }: { routings: readonly AiModelRouti
       <button
         type="button"
         className="-ml-0.5 flex max-w-full cursor-default items-center gap-1 rounded-md px-0.5 text-[11px] leading-4 text-kumo-inactive transition-colors hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
-        aria-label={`Routed to ${summary.map(({ model }) => model).join(", ")}`}
+        aria-label={`Routed to ${summary.map(({ model }) => routedModelName(model, models)).join(", ")}`}
       >
         <ArrowsSplit size={12} className="shrink-0" aria-hidden="true" />
         <span className="truncate">
           {summary.map(({ model, count }, i) => (
             <span key={model}>
               {i > 0 && " · "}
-              <span className="font-mono">{shortModelName(model)}</span>
+              <span>{routedModelName(model, models)}</span>
               {count > 1 && <span className="opacity-70"> ×{count}</span>}
             </span>
           ))}
