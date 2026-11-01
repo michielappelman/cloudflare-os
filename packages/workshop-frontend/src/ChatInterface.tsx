@@ -5976,7 +5976,7 @@ function ChatInterface({
                                 onFooterRevert={handleRevertChanges}
                               />
                             ))}
-                            {entry.routings && <RoutedModelBadge routings={entry.routings} models={availableModels} />}
+                            {entry.routings && <RoutedModelBadge routings={entry.routings} />}
                             {createdWorkpieces.map((created) => (
                               <CreatedWorkpieceChatCard
                                 key={created.workpieceId}
@@ -6162,7 +6162,7 @@ function ChatInterface({
                                       </span>
                                     </Tooltip>
                                   </div>
-                                  {entry.routings && <RoutedModelBadge routings={entry.routings} models={availableModels} />}
+                                  {entry.routings && <RoutedModelBadge routings={entry.routings} />}
                                 </div>
                               )}
                             </div>
@@ -6210,7 +6210,7 @@ function ChatInterface({
                               </div>
                             )}
 
-                            {entry.routings && !showActions && <RoutedModelBadge routings={entry.routings} models={availableModels} />}
+                            {entry.routings && !showActions && <RoutedModelBadge routings={entry.routings} />}
                           </div>
                             );
                           })()

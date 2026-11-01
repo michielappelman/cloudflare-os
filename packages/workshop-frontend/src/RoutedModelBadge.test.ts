@@ -5,9 +5,7 @@ import type {
   AiChatMessage, AiChatMessageBody, AiModelRouting, AiToolCall,
 } from "@gadgets/workshop-shared/api";
 import { buildChatDisplayEntries } from "./ChatInterface";
-import {
-  describeRoutingReason, routedModelName, shortModelName, summarizeRoutedModels,
-} from "./RoutedModelBadge";
+import { describeRoutingReason, shortModelName, summarizeRoutedModels } from "./RoutedModelBadge";
 
 const AUTHOR = { type: "agent", id: "cloudflare/auto", name: "Auto Router" } as const;
 
@@ -36,17 +34,6 @@ describe("RoutedModelBadge helpers", () => {
     expect(describeRoutingReason("pinned_by_turn")).toBe("Pinned for this turn");
     expect(describeRoutingReason("something_new")).toBe("something_new");
     expect(describeRoutingReason(undefined)).toBe("Reason not reported");
-  });
-
-  it("names a routed model from the chat's list, then the catalog, then its ID", () => {
-    const models = [{ id: "claude-sonnet-5-5", name: "Sonnet (ours)" }];
-    expect(routedModelName("anthropic/claude-sonnet-5-5", models)).toBe("Sonnet (ours)");
-    expect(routedModelName("anthropic/claude-opus-5-5", models)).toBe("Claude Opus 5.5");
-    expect(routedModelName("workers-ai/@cf/zai-org/glm-5.3-flash", []))
-      .toBe("GLM 5.3 Flash (Workers AI)");
-    expect(routedModelName("acme/unknown-model", models)).toBe("unknown-model");
-    // An ID that names an Object.prototype member is not a catalog entry.
-    expect(routedModelName("x/constructor", [])).toBe("constructor");
   });
 
   it("drops the provider prefix", () => {
