@@ -35,18 +35,30 @@ export type ModelNames = readonly Pick<AiChatAuthorInfo, "id" | "name">[];
 
 /**
  * A routed model's display name. The router reports `provider/model-id`; the model ID is the one
- * the chat's model list and SUGGESTED_MODELS key models by. The list comes first, so an admin's own
+ * the chat's model list and SUGGESTED_MODELS key models by, up to its separators (see
+ * comparableModelId). The list comes first, so an admin's own
  * name for a model wins; the catalog covers models the list leaves out (hidden or disabled ones
  * the router can still pick); an unknown model shows its ID.
  */
 export function routedModelName(model: string, models: ModelNames): string {
   const id = shortModelName(model);
-  const offered = models.find((entry) => entry.id === id);
+  const key = comparableModelId(id);
+  const offered = models.find((entry) => comparableModelId(entry.id) === key);
   if (offered) return offered.name;
   for (const catalog of Object.values(SUGGESTED_MODELS)) {
-    if (Object.hasOwn(catalog, id)) return catalog[id]!.name;
+    for (const [catalogId, entry] of Object.entries(catalog)) {
+      if (comparableModelId(catalogId) === key) return entry.name;
+    }
   }
   return id;
+}
+
+/**
+ * A model ID with separators made uniform. The router reports versions with dots
+ * ("claude-sonnet-5.5") where provider APIs and the catalog use dashes ("claude-sonnet-5-5").
+ */
+function comparableModelId(id: string): string {
+  return id.toLowerCase().replace(/[._]/g, "-");
 }
 
 /** Distinct routed models in order of first use, with how many requests each served. */
