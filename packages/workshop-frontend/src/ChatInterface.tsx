@@ -59,6 +59,7 @@ import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import styles from "./ChatInterface.module.css";
+import { RoutedModelBadge } from "./features/chat/RoutedModelBadge";
 import {
   getStoredSelectedModel,
   persistSelectedModel,
@@ -75,6 +76,7 @@ import {
   CapsuleSpecifier,
   AiChatStreamEvent,
   AiToolCall,
+  AiModelRouting,
   SlashCommandId,
   SlashCommandRequest,
   ChatAttachmentHandle,
@@ -1852,6 +1854,9 @@ type ChatDisplayEntry =
       toolCalls?: AiToolCall[];
       toolCallGroups?: ToolCallGroup[];
       lastMessageSequence?: number;
+      // Auto Router choices for the model requests folded into this row, oldest first. Absent
+      // when none were routed.
+      routings?: AiModelRouting[];
     }
   | {
       type: "workRun";
@@ -1861,6 +1866,7 @@ type ChatDisplayEntry =
       toolCallGroups: ToolCallGroup[];
       lastMessageSequence: number;
       lastMessageTimestamp: Date;
+      routings?: AiModelRouting[];
     }
   | {
       type: "savedChanges";
@@ -1891,6 +1897,7 @@ type WorkMessageParts = {
   lastAgentMessageSequence: number | null;
   lastWorkSequence: number;
   lastWorkTimestamp: Date;
+  routings: AiModelRouting[];
 };
 
 function isAssistantMessageWithoutVisibleText(msg: AiChatMessage): msg is Extract<AiChatMessage, { type: "message" }> {
@@ -1916,6 +1923,7 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
       lastAgentMessageSequence: null,
       lastWorkSequence: msg.sequence,
       lastWorkTimestamp: msg.timestamp,
+      routings: [],
     };
   }
 
@@ -1930,6 +1938,7 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
       lastAgentMessageSequence: msg.sequence,
       lastWorkSequence: msg.sequence,
       lastWorkTimestamp: msg.timestamp,
+      routings: msg.routing ? [msg.routing] : [],
     };
   }
 
@@ -1939,6 +1948,7 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
 function appendWorkParts(target: WorkMessageParts, source: WorkMessageParts) {
   target.toolCalls.push(...source.toolCalls);
   target.observations.push(...source.observations);
+  target.routings.push(...source.routings);
   target.lastWorkSequence = source.lastWorkSequence;
   target.lastWorkTimestamp = source.lastWorkTimestamp;
   if (source.lastAgentMessageSequence !== null) {
@@ -2207,6 +2217,7 @@ export function buildChatDisplayEntries(
         lastAgentMessageSequence: initialWorkParts.lastAgentMessageSequence,
         lastWorkSequence: initialWorkParts.lastWorkSequence,
         lastWorkTimestamp: initialWorkParts.lastWorkTimestamp,
+        routings: [...initialWorkParts.routings],
       };
       let j = i + 1;
       while (j < messages.length) {
@@ -2234,6 +2245,7 @@ export function buildChatDisplayEntries(
         ),
         lastMessageSequence: workParts.lastAgentMessageSequence ?? workParts.lastWorkSequence,
         lastMessageTimestamp: workParts.lastWorkTimestamp,
+        ...(workParts.routings.length > 0 ? {routings: workParts.routings} : {}),
       });
 
       i = j;
@@ -2247,6 +2259,7 @@ export function buildChatDisplayEntries(
         lastAgentMessageSequence: msg.sequence,
         lastWorkSequence: msg.sequence,
         lastWorkTimestamp: msg.timestamp,
+        routings: msg.routing ? [msg.routing] : [],
       };
       let j = i + 1;
       while (j < messages.length) {
@@ -2274,6 +2287,7 @@ export function buildChatDisplayEntries(
             outputOf,
           ),
           lastMessageSequence: workParts.lastAgentMessageSequence ?? msg.sequence,
+          ...(workParts.routings.length > 0 ? {routings: workParts.routings} : {}),
         });
         i = j;
         continue;
@@ -2284,6 +2298,7 @@ export function buildChatDisplayEntries(
       type: "message",
       key: `msg-${msg.chatId}-${msg.sequence}`,
       message: msg,
+      ...(msg.type === "message" && msg.routing ? {routings: [msg.routing]} : {}),
     });
     i++;
   }
@@ -5956,6 +5971,7 @@ function ChatInterface({
                                 onFooterRevert={handleRevertChanges}
                               />
                             ))}
+                            {entry.routings && <RoutedModelBadge routings={entry.routings} />}
                             {createdWorkpieces.map((created) => (
                               <CreatedWorkpieceChatCard
                                 key={created.workpieceId}
@@ -6093,50 +6109,55 @@ function ChatInterface({
                               )}
 
                               {showActions && (
-                                <div className={`mt-0.5 -ml-1 flex items-center gap-1 transition-opacity duration-150 ease-out ${
-                                  keepActionsVisible
-                                    ? "opacity-100"
-                                    : "opacity-100 sm:opacity-0 sm:group-hover/agentMessage:opacity-100 sm:group-focus-within/agentMessage:opacity-100"
-                                }`}>
-                                  {hasMessageText && (
-                                    <Tooltip content="Copy message" asChild>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleCopyMessage(msg.message)}
-                                        className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96]"
-                                        aria-label="Copy message"
-                                      >
-                                        <Copy size={15} />
-                                      </button>
+                                // The model badge sits outside the actions so it stays visible while
+                                // they fade on desktop.
+                                <div className="mt-0.5 -ml-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                  <div className={`flex items-center gap-1 transition-opacity duration-150 ease-out ${
+                                    keepActionsVisible
+                                      ? "opacity-100"
+                                      : "opacity-100 sm:opacity-0 sm:group-hover/agentMessage:opacity-100 sm:group-focus-within/agentMessage:opacity-100"
+                                  }`}>
+                                    {hasMessageText && (
+                                      <Tooltip content="Copy message" asChild>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleCopyMessage(msg.message)}
+                                          className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96]"
+                                          aria-label="Copy message"
+                                        >
+                                          <Copy size={15} />
+                                        </button>
+                                      </Tooltip>
+                                    )}
+                                    {pendingChange && (() => {
+                                      const label = getDiscardLabel(
+                                        pendingChange.through === lastDurablePendingChange?.sequence,
+                                        pendingChange.createdWorkpieces,
+                                      );
+                                      return (
+                                      <Tooltip content={label} asChild>
+                                        <button
+                                          type="button"
+                                          disabled={isAgentActive}
+                                          onClick={() => handleRevertChanges(pendingChange.revertFrom)}
+                                          className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
+                                          aria-label={label}
+                                        >
+                                          <ArrowUUpLeft size={15} />
+                                        </button>
+                                      </Tooltip>
+                                      );
+                                    })()}
+                                    <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                      <span className="px-1 font-mono text-[11px] leading-4 text-kumo-inactive">
+                                        {msg.timestamp.toLocaleTimeString([], {
+                                          hour: "2-digit",
+                                          minute: "2-digit",
+                                        })}
+                                      </span>
                                     </Tooltip>
-                                  )}
-                                  {pendingChange && (() => {
-                                    const label = getDiscardLabel(
-                                      pendingChange.through === lastDurablePendingChange?.sequence,
-                                      pendingChange.createdWorkpieces,
-                                    );
-                                    return (
-                                    <Tooltip content={label} asChild>
-                                      <button
-                                        type="button"
-                                        disabled={isAgentActive}
-                                        onClick={() => handleRevertChanges(pendingChange.revertFrom)}
-                                        className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
-                                        aria-label={label}
-                                      >
-                                        <ArrowUUpLeft size={15} />
-                                      </button>
-                                    </Tooltip>
-                                    );
-                                  })()}
-                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                                    <span className="px-1 font-mono text-[11px] leading-4 text-kumo-inactive">
-                                      {msg.timestamp.toLocaleTimeString([], {
-                                        hour: "2-digit",
-                                        minute: "2-digit",
-                                      })}
-                                    </span>
-                                  </Tooltip>
+                                  </div>
+                                  {entry.routings && <RoutedModelBadge routings={entry.routings} />}
                                 </div>
                               )}
                             </div>
@@ -6183,6 +6204,8 @@ function ChatInterface({
                                 ))}
                               </div>
                             )}
+
+                            {entry.routings && !showActions && <RoutedModelBadge routings={entry.routings} />}
                           </div>
                             );
                           })()
