@@ -74,6 +74,16 @@ export type GatekeeperRecord = {
 };
 
 /**
+ * The vendor a connection belongs to, as its creationSpec names it (case preserved, as account
+ * selection and the User DO's getVerifier() expect it). Undefined for vendorless records
+ * (aiModel/agentSpawner) and legacy ones with no creationSpec.
+ */
+export function connectionVendorId(record: GatekeeperRecord | undefined): string | undefined {
+  let spec = record?.creationSpec;
+  return spec && "vendorId" in spec ? spec.vendorId : undefined;
+}
+
+/**
  * A stored blueprint annotation. Those written while the UI still offered an exclusion control
  * may carry `included: false`, which keeps the binding out of blueprints. Nothing writes the
  * flag anymore, but old binding edges still hold it and collectBindingMetadata honors it.
@@ -405,7 +415,9 @@ export type GatekeeperCaller = {
   /**
    * Which gadget made the call. Optional for backward compatibility: callers embedded in
    * ActionRecords persisted before multi-gadget support have no gadgetId. `defaultGadgetId`
-   * should be assumed when `gadgetId` is absent.
+   * should be assumed when `gadgetId` is absent -- except by observer tracking, which refuses
+   * such a caller (see observerContextOf): the default gadget can change, and attribution must
+   * not.
    */
   gadgetId?: WorkpieceId;
 } | {
@@ -413,6 +425,14 @@ export type GatekeeperCaller = {
   chatId?: number;
 } | {
   from: "hook";
+
+  /**
+   * The gadget the firing hook wakes: its BoundHookRecord's `gadgetId`, or the `defaultGadgetId`
+   * that resolved to when it fired. Observer tracking attributes the firing's observations to it
+   * (see observerContextOf). Absent when neither names a gadget, and on records written before
+   * firings carried it.
+   */
+  gadgetId?: WorkpieceId;
 };
 
 export type ActionRecord = {
@@ -449,6 +469,15 @@ export type ActionRecord = {
   autoApproved?: boolean;         // set when applied by an auto-approval rule rather than a human
 } | {
   type: "observation";
+
+  /**
+   * `subresources` is kept only on an observation the Workshop verified them for: it writes the
+   * validated list, and strips the field from a pending creation's simulated read. Kept, it makes
+   * the record an observer requirement, attributed by `caller` (see observerContextOf and
+   * ObserverLedger.observerScope). Nothing else stores requirements, which is why the
+   * action log is append-only: deleting such a record would silently drop checks while its
+   * connection still exists.
+   */
   description: ObservationDescription;
 } | {
   type: "bindHook";
@@ -484,9 +513,10 @@ export type BoundHookRecord = {
   gatekeeperId: WorkpieceId;
 
   /**
-   * The gadget whose code this hook wakes. Bookkeeping only -- used to display which gadget a
-   * hook belongs to and to delete a gadget's hooks when the gadget is deleted. Operationally the
-   * `callback` already encapsulates OverseerRestoreParams pointing at the correct gadget.
+   * The gadget whose code this hook wakes: shown as the hook's gadget, deleted with it, and
+   * trusted for its "use" scope and the attribution of its firings (see GatekeeperCaller).
+   * Operationally the `callback` encapsulates its own OverseerRestoreParams, which an agent-bound
+   * hook's inferred gadgetId (see OverseerImpl.bindHook) can rarely mismatch; that is accepted.
    * If omitted, use `defaultGadgetId`.
    */
   gadgetId?: WorkpieceId;
@@ -1049,6 +1079,12 @@ export type ShareLinkRecord = {
   role?: CollaboratorRole;
 
   /**
+   * The one gadget a "use" link grants (see PermissionEdge.gadgetId). A "use" link without one
+   * grants every gadget; no such links are created anymore, and redeeming one adds no one new.
+   */
+  gadgetId?: WorkpieceId;
+
+  /**
    * Soft-revocation flag. Revoking a link sets this rather than deleting the record, so that the
    * permission graph keeps its `shareKey` edges intact (no dangling references) and access could
    * be restored in the future. A revoked link contributes nothing to the permission graph and its
@@ -1074,10 +1110,11 @@ export type ShareKeyRecord = ShareLinkRecord | ShareKeyAliasRecord;
 
 /**
  * Storage record describing a non-owner collaborator who has configured their gatekeeper accounts
- * and passed all `addObserver` checks -- i.e. is actually set up to observe data the Gadget has
- * read. This is distinct from the sharing table (which records the owner's *intent* that a user
- * have access): opening requires BOTH a reachable role in the sharing graph AND a complete
- * observer record. See observers-implementation-plan.md §3.
+ * and passed the observer checks of something they opened -- the workspace, for a "build"
+ * collaborator, or one gadget -- i.e. is actually set up to observe data it has read. This is
+ * distinct from the sharing table (which records the owner's *intent* that a user have access):
+ * opening requires BOTH reachable access in the sharing graph AND passing verification for what
+ * is opened, which this record only remembers choices for. See observers-implementation-plan.md §3.
  */
 export type ObserverRecord = {
   /** The sharing-table key for this user (their profile.id). Primary key of the collection. */
@@ -1099,6 +1136,70 @@ export type ObserverRecord = {
    */
   accountChoices: { [gatekeeperId: number]: number };
 };
+
+/**
+ * What an observer requirement is attached to: the workspace (requirements with no
+ * narrower trusted attribution, which every chat and gadget includes), one chat, or one gadget.
+ */
+export type ObserverContext =
+  | {type: "workspace"}
+  | {type: "chat", chatId: number}
+  | {type: "gadget", gadgetId: WorkpieceId};
+
+/**
+ * The context an observation by `caller` is attributed to: its trusted binding authorizer's chat
+ * or gadget, the gadget a firing hook wakes, or the workspace for a hook naming no gadget and a
+ * user acting outside any chat. Undefined for gadget callers persisted without a gadgetId.
+ *
+ * The actions `byObserverRequirement` index stores this mapping's result when each record is
+ * written, so changing an existing attributed mapping requires reindexing its observations keeping
+ * `subresources`.
+ */
+export function observerContextOf(caller: GatekeeperCaller): ObserverContext | undefined {
+  switch (caller.from) {
+    case "agent": return {type: "chat", chatId: caller.chatId};
+    case "user":
+      return caller.chatId !== undefined ? {type: "chat", chatId: caller.chatId} : {type: "workspace"};
+    case "gadget":
+      return caller.gadgetId !== undefined ? {type: "gadget", gadgetId: caller.gadgetId} : undefined;
+    case "hook":
+      return caller.gadgetId !== undefined
+          ? {type: "gadget", gadgetId: caller.gadgetId} : {type: "workspace"};
+  }
+}
+
+// Leads the part of an observer requirement key naming its context's type.
+const OBSERVER_CONTEXT_TAGS = {workspace: "w", chat: "c", gadget: "g"} as const;
+
+/**
+ * `listKeys()` prefix selecting the actions `byObserverRequirement` keys through `gatekeeperId` on
+ * `context`, or on every context of that type when given only a type.
+ */
+export function observerRequirementPrefix(
+    gatekeeperId: WorkpieceId, context: ObserverContext | ObserverContext["type"]): string {
+  if (typeof context === "string") {
+    return `${keyString(gatekeeperId)}:${OBSERVER_CONTEXT_TAGS[context]}`;
+  }
+  let id = context.type === "chat" ? keyString(context.chatId)
+      : context.type === "gadget" ? keyString(context.gadgetId) : "";
+  return `${observerRequirementPrefix(gatekeeperId, context.type)}${id}:`;
+}
+
+/**
+ * Key of the actions `byObserverRequirement` index: one per subresource of an observer
+ * requirement, led by its connection and context (see observerRequirementPrefix()) and ending
+ * with the subresource itself (see observerRequirementSubresource()). The connection and context
+ * parts are colon-free and colon-terminated, so they never run into the subresource.
+ */
+export function observerRequirementKey(
+    gatekeeperId: WorkpieceId, context: ObserverContext, subresource: string): string {
+  return `${observerRequirementPrefix(gatekeeperId, context)}${subresource}`;
+}
+
+/** The subresource an observerRequirementKey() names: everything after its second colon. */
+export function observerRequirementSubresource(key: string): string {
+  return key.slice(key.indexOf(":", key.indexOf(":") + 1) + 1);
+}
 
 // =======================================================================================
 // Blueprints
@@ -1354,7 +1455,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       actions: collection<ActionRecord>()({
         primaryKey: "id",
 
-        // All three indexes are backfilled by the version-3 migration.
+        // The first three indexes are backfilled by the version-3 migration;
+        // byObserverRequirement needs none: no gatekeeper reported subresources before the
+        // Workshop enforced them, so no earlier observation is a requirement.
         uniqueIndexes: {
           // Resume-replay index (see subscribeToActions): keyed by last state-change time so a
           // reconnect replays only the records changed during the gap.
@@ -1373,6 +1476,23 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           // read. The "all" filter has no key: it reads the collection itself.
           byHistoryFilter(record: ActionRecord) {
             return record.state === "pending" ? ["pending", record.type] : record.type;
+          },
+
+          // Sparse index over the observer requirements: one key per subresource of each
+          // observation through a real connection that kept `subresources` (see ActionRecord),
+          // led by the connection and the context its caller attributes it to. Admission lists
+          // only the distinct keys (see ObserverLedger.observerScope), never the records
+          // under them, so its cost follows distinct requirements, not repeated reads.
+          byObserverRequirement(record: ActionRecord): string[] {
+            let subresources = record.type === "observation" && record.gatekeeperId >= 0
+                ? record.description.subresources : undefined;
+            let context = subresources ? observerContextOf(record.caller) : undefined;
+            if (!subresources || !context) return [];
+            let keys = new Set<string>();
+            for (let id of subresources) {
+              keys.add(observerRequirementKey(record.gatekeeperId, context, id));
+            }
+            return [...keys];
           },
         }
       }),
