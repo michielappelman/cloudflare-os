@@ -351,11 +351,16 @@ describe("getModel AI Gateway routing", () => {
         })}\n\ndata: [DONE]\n\n`, { headers: {
           "content-type": "text/event-stream", "cf-aig-log-id": "log-1",
           "cf-aig-routed-model": "anthropic/claude-sonnet-5.5",
+          "cf-aig-routing-reason": "cost_optimal_within_pool",
+          "cf-aig-routing-decision-id": "decision-1",
         } })) as typeof fetch,
       });
       expect((await stream.result()).stopReason).toBe("stop");
-      expect(handle.lastResponse).toEqual(
-          { status: 200, aiGatewayLogId: "log-1", routedModel: "anthropic/claude-sonnet-5.5" });
+      expect(handle.lastResponse).toEqual({
+        status: 200, aiGatewayLogId: "log-1", routedModel: "anthropic/claude-sonnet-5.5",
+        routingReason: "cost_optimal_within_pool", routingDecisionId: "decision-1",
+        durationMs: expect.any(Number),
+      });
     }, 15000);
 
     it("runs through no direct connection", () => {

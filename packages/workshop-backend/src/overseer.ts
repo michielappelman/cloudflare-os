@@ -43,6 +43,7 @@ import {
   AiGatewayLogRetryableError,
   getAiGatewayConfig,
   getAiGatewayLogCost,
+  getGatewayModels,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
 import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, agentCodeChangeShape, alwaysAvailableResources, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
@@ -7473,6 +7474,12 @@ class OverseerImpl implements AgentHooks {
               metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
             });
         turn.setModel(chosenModel.model);
+        // Auto Router reports the model it routed to by ID; name it as the deployment does. One
+        // admin-config read per turn, as a model binding takes at each session start.
+        if (aiModel.config.provider === "cloudflare-auto-router") {
+          let models = await getGatewayModels(this.env);
+          if (models) chosenModel.routedModelName = model => models.routedModelName(model);
+        }
 
         let controller = liveChat.cancelController;
         controller.signal.throwIfAborted();

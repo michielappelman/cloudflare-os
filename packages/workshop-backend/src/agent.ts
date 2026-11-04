@@ -4143,6 +4143,21 @@ async function runAgentPass(
             });
           }
 
+          let response = handle.lastResponse;
+          if (response?.routedModel) {
+            let {input, cacheRead, cacheWrite, output} = message.usage;
+            let name = handle.routedModelName?.(response.routedModel);
+            msg.routing = {
+              model: response.routedModel,
+              ...(name ? {name} : {}),
+              reason: response.routingReason,
+              decisionId: response.routingDecisionId,
+              inputTokens: input + cacheRead + cacheWrite,
+              outputTokens: output,
+              durationMs: response.durationMs,
+            };
+          }
+
           // The model-facing snapshot rides along for the overseer to persist beside the display
           // record.
           msg.modelData = makeStoredAssistantMessage(message);

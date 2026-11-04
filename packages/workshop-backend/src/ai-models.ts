@@ -115,13 +115,30 @@ export type ModelHandle = {
   aiGatewayLogRoute?: AiGatewayLogRoute;
 
   /**
+   * For the Auto Router, the deployment's display name for a model it routed to (see
+   * GatewayModels.routedModelName), recorded as `AiModelRouting.name`. Set by the caller that
+   * holds the deployment's models; absent elsewhere.
+   */
+  routedModelName?: (model: string) => string | undefined;
+
+  /**
    * Status and AI Gateway log id of the most recent HTTP response observed by `stream`, and for
    * the Auto Router model the gateway model that answered. Reset at the start of every request
    * and set from pi's onResponse callback (which fires only once a response arrives -- an
    * SDK-level failure leaves this undefined), so consumers must read it right after the request
    * they care about completes. Turns run requests sequentially, so this is safe.
    */
-  lastResponse?: { status: number; aiGatewayLogId?: string; routedModel?: string };
+  lastResponse?: {
+    status: number;
+    aiGatewayLogId?: string;
+    routedModel?: string;
+    /** Why Auto Router chose `routedModel` (`cf-aig-routing-reason`). */
+    routingReason?: string;
+    /** Auto Router's identifier for that choice (`cf-aig-routing-decision-id`). */
+    routingDecisionId?: string;
+    /** From sending the request to the end of the response, once the response has ended. */
+    durationMs?: number;
+  };
 
   /**
    * The most recent request `stream` sent with prompt caching on, once its response ends, if the
@@ -560,6 +577,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
       // This request's own response metadata: concurrent requests on one handle overwrite
       // `lastResponse`, but not this.
       let received: ModelHandle["lastResponse"];
+      const startedAt = Date.now();
       // This request as sent, and when, if prompt caching is on.
       let sent: { payload: unknown; at: number } | undefined;
       const headers: ProviderHeaders = {
@@ -596,6 +614,8 @@ function makeHandle(args: HandleArgs): ModelHandle {
             status: response.status,
             aiGatewayLogId: getHeader(response.headers, "cf-aig-log-id"),
             routedModel: getHeader(response.headers, "cf-aig-routed-model"),
+            routingReason: getHeader(response.headers, "cf-aig-routing-reason"),
+            routingDecisionId: getHeader(response.headers, "cf-aig-routing-decision-id"),
           };
           handle.lastResponse = received;
           await options.onResponse?.(response, responseModel);
@@ -621,8 +641,11 @@ function makeHandle(args: HandleArgs): ModelHandle {
       };
       const stream = traceChat(model, () => received,
           () => streamFn(model, transcript, merged));
-      // Kept once the response ends, which is before its caller can start another request.
+      // Kept once the response ends, which is before its caller can start another request. This
+      // callback is registered before the stream is returned, so it runs before any caller's own
+      // continuation on result(), which can therefore read `durationMs`.
       void stream.result().then(message => {
+        if (received) received.durationMs = Date.now() - startedAt;
         if (sent === undefined) return;
         handle.lastRequest = cachedRequest(streamFn, model, transcript, sent, message.usage,
             args.aiGatewayLogRoute, {

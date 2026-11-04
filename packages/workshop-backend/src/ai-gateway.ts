@@ -285,6 +285,18 @@ export class GatewayModels {
   }
 
   /**
+   * The display name of the model Auto Router reports it routed to (`cf-aig-routed-model`), in any
+   * mode, since the router's pool is not bound by what the pickers offer. The router reports
+   * `provider/id` with dotted versions ("anthropic/claude-sonnet-5.5") where gateway model IDs use
+   * dashes ("claude-sonnet-5-5"), so IDs are compared with their separators made uniform.
+   */
+  routedModelName(model: string): string | undefined {
+    let slash = model.indexOf("/");
+    let key = comparableModelId(slash === -1 ? model : model.slice(slash + 1));
+    return this.all.find(entry => comparableModelId(entry.id) === key)?.name;
+  }
+
+  /**
    * The models of one kind offered in pickers, i.e. the enabled ones, as AiChatAuthorInfo
    * entries.
    */
@@ -379,6 +391,11 @@ export class GatewayModels {
       throw new Error(`"${model.id}" is already an added model.`);
     }
   }
+}
+
+/** A model ID with dots, underscores and dashes made one separator, for routedModelName(). */
+function comparableModelId(id: string): string {
+  return id.toLowerCase().replace(/[._]/g, "-");
 }
 
 /**
