@@ -354,8 +354,11 @@ describe("getModel AI Gateway routing", () => {
         } })) as typeof fetch,
       });
       expect((await stream.result()).stopReason).toBe("stop");
-      expect(handle.lastResponse).toEqual(
-          { status: 200, aiGatewayLogId: "log-1", routedModel: "anthropic/claude-sonnet-5.5" });
+      // The routing (with its reason) is recorded too, for the agent message it produces.
+      expect(handle.lastResponse).toMatchObject({
+        status: 200, aiGatewayLogId: "log-1", routedModel: "anthropic/claude-sonnet-5.5",
+        routing: { model: "anthropic/claude-sonnet-5.5" },
+      });
     }, 15000);
 
     it("runs through no direct connection", () => {

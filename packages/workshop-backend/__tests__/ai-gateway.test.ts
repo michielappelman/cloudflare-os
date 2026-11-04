@@ -178,6 +178,22 @@ describe("GatewayModels", () => {
           .providerSettings.filter(({ needsApiToken }) => needsApiToken)
           .map(({ provider }) => provider);
 
+  it("names the model Auto Router routed to in any mode, matching dotted versions", () => {
+    const haiku = {
+      provider: "anthropic" as const, id: "claude-haiku-5-5", name: "Haiku 5.5",
+      contextWindow: 400000,
+    };
+    const models = gatewayModels({
+      addedModels: [haiku],
+      modelModes: { "claude-haiku-5-5": "hidden", "claude-opus-5-5": "disabled" },
+    });
+    // The gateway reports dotted versions; the models are keyed with dashes.
+    expect(models.routedModelName("anthropic/claude-haiku-5.5")).toBe("Haiku 5.5");
+    expect(models.routedModelName("anthropic/claude-opus-5.5")).toBe("Claude Opus 5.5");
+    expect(models.routedModelName("anthropic/claude-sonnet-5-5")).toBe("Claude Sonnet 5.5");
+    expect(models.routedModelName("anthropic/not-a-model")).toBeUndefined();
+  });
+
   it("offers each catalog model in its default mode, on enabled providers only", () => {
     const models = gatewayModels();
     expect(models.get("claude-opus-5-5")).toStrictEqual({

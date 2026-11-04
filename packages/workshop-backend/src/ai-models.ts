@@ -28,8 +28,9 @@ import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
 import { DecisionAnswer, DecisionModelBinding, DecisionRequest } from "./decision-model-binding";
 import DECISION_MODEL_BINDING_TYPES from "./decision-model-binding.txt";
 import {
-  AiChatAuthorInfo, AiModelConfig, AiModelProvider, BuiltInReasoning, GatewayModelCapabilities,
-  REASONING_LEVELS, ReasoningLevel, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT,
+  AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiModelRouting, BuiltInReasoning,
+  GatewayModelCapabilities, REASONING_LEVELS, ReasoningLevel, SUGGESTED_MODELS,
+  WORKERS_AI_OUTPUT_LIMIT,
 } from "@gadgets/workshop-shared/api";
 import { traceChat } from "./agent-tracing.js";
 import {
@@ -115,13 +116,28 @@ export type ModelHandle = {
   aiGatewayLogRoute?: AiGatewayLogRoute;
 
   /**
+   * For the Auto Router, the deployment's display name for a model it routed to (see
+   * GatewayModels.routedModelName), recorded as `AiModelRouting.name`. Set by the caller that
+   * holds the deployment's models; absent elsewhere.
+   */
+  routedModelName?: (model: string) => string | undefined;
+
+  /**
    * Status and AI Gateway log id of the most recent HTTP response observed by `stream`, and for
    * the Auto Router model the gateway model that answered. Reset at the start of every request
    * and set from pi's onResponse callback (which fires only once a response arrives -- an
    * SDK-level failure leaves this undefined), so consumers must read it right after the request
    * they care about completes. Turns run requests sequentially, so this is safe.
    */
-  lastResponse?: { status: number; aiGatewayLogId?: string; routedModel?: string };
+  lastResponse?: {
+    status: number;
+    aiGatewayLogId?: string;
+    routedModel?: string;
+    /** Auto Router's choice for the request, with its reason; absent for every other model. */
+    routing?: Pick<AiModelRouting, "model" | "reason" | "decisionId">;
+    /** From sending the request to the end of the response, once the response has ended. */
+    durationMs?: number;
+  };
 
   /**
    * The most recent request `stream` sent with prompt caching on, once its response ends, if the
@@ -560,6 +576,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
       // This request's own response metadata: concurrent requests on one handle overwrite
       // `lastResponse`, but not this.
       let received: ModelHandle["lastResponse"];
+      const startedAt = Date.now();
       // This request as sent, and when, if prompt caching is on.
       let sent: { payload: unknown; at: number } | undefined;
       const headers: ProviderHeaders = {
@@ -592,10 +609,20 @@ function makeHandle(args: HandleArgs): ModelHandle {
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
         sessionId: options.sessionId ?? args.sessionAffinity,
         onResponse: async (response, responseModel) => {
+          const routedModel = getHeader(response.headers, "cf-aig-routed-model");
           received = {
             status: response.status,
             aiGatewayLogId: getHeader(response.headers, "cf-aig-log-id"),
-            routedModel: getHeader(response.headers, "cf-aig-routed-model"),
+            routedModel,
+            ...(routedModel
+                ? {
+                    routing: {
+                      model: routedModel,
+                      reason: getHeader(response.headers, "cf-aig-routing-reason"),
+                      decisionId: getHeader(response.headers, "cf-aig-routing-decision-id"),
+                    },
+                  }
+                : {}),
           };
           handle.lastResponse = received;
           await options.onResponse?.(response, responseModel);
@@ -623,6 +650,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
           () => streamFn(model, transcript, merged));
       // Kept once the response ends, which is before its caller can start another request.
       void stream.result().then(message => {
+        if (received) received.durationMs = Date.now() - startedAt;
         if (sent === undefined) return;
         handle.lastRequest = cachedRequest(streamFn, model, transcript, sent, message.usage,
             args.aiGatewayLogRoute, {
