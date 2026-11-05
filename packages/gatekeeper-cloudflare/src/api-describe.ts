@@ -184,7 +184,7 @@ export function describeChange(call: DescribedCall, before?: unknown): ActionDes
           autoApprovable: true,
           actionKind: { tag: actionKindTag(operation.product), label: productLabel(operation.product) },
         }
-      : {}),
+      : { autoApprovable: false }),
   };
 }
 

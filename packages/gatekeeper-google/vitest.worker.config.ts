@@ -5,7 +5,10 @@ import deployed from "./cloudflare.config.ts";
 
 const { compatibilityDate, compatibilityFlags } = deployed.worker;
 
-/** Workerd coverage for Google resource configurators and the Gmail, Chat, Calendar and BigQuery Durable Objects. */
+/**
+ * Workerd coverage for Google resource configurators and the Gmail, Chat, Calendar and BigQuery
+ * Durable Objects, and for the Drive, Docs, Sheets and Slides observer checks.
+ */
 export default defineConfig({
   plugins: [
     capnwebValidate(),
@@ -26,6 +29,10 @@ export default defineConfig({
           GmailHookDriver: {className: "GmailHookDriver", useSQLite: true},
           GoogleCalendarGatekeeperImpl: {className: "GoogleCalendarGatekeeperImpl", useSQLite: true},
           GoogleChatGatekeeperImpl: {className: "GoogleChatGatekeeperImpl", useSQLite: true},
+          GoogleDocGatekeeperImpl: {className: "GoogleDocGatekeeperImpl", useSQLite: true},
+          GoogleDriveGatekeeperImpl: {className: "GoogleDriveGatekeeperImpl", useSQLite: true},
+          GoogleSheetsGatekeeperImpl: {className: "GoogleSheetsGatekeeperImpl", useSQLite: true},
+          GoogleSlidesGatekeeperImpl: {className: "GoogleSlidesGatekeeperImpl", useSQLite: true},
           TestHooks: {className: "TestHooks", useSQLite: true},
           UserAccount: {className: "UserAccount", useSQLite: true},
         },
@@ -39,10 +46,13 @@ export default defineConfig({
       "__tests__/workerd/calendar-observers.test.ts",
       "__tests__/workerd/chat-actions.test.ts",
       "__tests__/workerd/chat-hooks.test.ts",
+      "__tests__/workerd/chat-observers.test.ts",
       "__tests__/workerd/configurators.test.ts",
       "__tests__/workerd/gmail-actions.test.ts",
       "__tests__/workerd/gmail-hooks.test.ts",
+      "__tests__/workerd/gmail-observers.test.ts",
       "__tests__/workerd/gmail-state.test.ts",
+      "__tests__/workerd/workspace-observers.test.ts",
     ],
     setupFiles: ["@gadgets/scripts/assert-workerd"],
   },

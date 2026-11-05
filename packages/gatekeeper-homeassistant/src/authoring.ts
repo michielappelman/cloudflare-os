@@ -802,6 +802,8 @@ function describeSaveConfigItem(
     title: sanitizeTitle(`${isNew ? "Create" : "Edit"} ${domain}: ${name}`),
     ...builder.finish(),
     implementsRevert: true,
+    // Authoring changes what Home Assistant does later on its own, so a person always reviews it.
+    autoApprovable: false,
   };
 }
 
@@ -820,6 +822,8 @@ function describeDeleteConfigItem(
     title: sanitizeTitle(`Delete ${domain}: ${name}`),
     ...builder.finish(),
     implementsRevert: true,
+    // Authoring changes what Home Assistant does later on its own, so a person always reviews it.
+    autoApprovable: false,
   };
 }
 
@@ -846,6 +850,8 @@ function describeSaveGroup(
     title: sanitizeTitle(`${groupId ? "Edit" : "Create"} ${kind}: ${name}`),
     ...builder.finish(),
     implementsRevert: true,
+    // Authoring changes what Home Assistant does later on its own, so a person always reviews it.
+    autoApprovable: false,
   };
 }
 
@@ -896,6 +902,8 @@ function describeDeleteGroup(
     title: sanitizeTitle(`Delete ${kind}: ${name}`),
     ...builder.finish(),
     implementsRevert: true,
+    // Authoring changes what Home Assistant does later on its own, so a person always reviews it.
+    autoApprovable: false,
   };
 }
 
@@ -959,7 +967,7 @@ function describeAssignEntities(
     count === 1
       ? `Organise: ${entityIds.length ? entityName(entityIds[0], registry) : unresolved[0]}`
       : `Organise ${count} entities`;
-  return { title: sanitizeTitle(title), ...builder.finish(), implementsRevert: true };
+  return { title: sanitizeTitle(title), ...builder.finish(), implementsRevert: true, autoApprovable: false };
 }
 
 function describeAssignDevices(
@@ -976,5 +984,5 @@ function describeAssignDevices(
     action.deviceIds.length === 1
       ? `Organise device: ${deviceName(action.deviceIds[0], registry)}`
       : `Organise ${action.deviceIds.length} devices`;
-  return { title: sanitizeTitle(title), ...builder.finish(), implementsRevert: true };
+  return { title: sanitizeTitle(title), ...builder.finish(), implementsRevert: true, autoApprovable: false };
 }

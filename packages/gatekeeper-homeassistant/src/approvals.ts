@@ -2,7 +2,7 @@
 //
 // Responsibilities split out from `homeassistant.ts` to keep that file manageable:
 // - `describeAction()` — produces a human-readable ActionDescription from a raw action,
-//   given a registry snapshot for name lookups.
+//   given a registry snapshot for name lookups, with its kind and verdict from `auto-approval.ts`.
 // - `canRevert()` — returns whether we know how to undo this action.
 // - `resolveTargets()` — expands an HA service-call target into the concrete set of
 //   affected entity_ids using the registry snapshot.
@@ -20,6 +20,12 @@ import {
 } from "./homeassistant-api";
 import { resolveTargets } from "./registry-utils";
 import { describeAuthoringAction, isAuthoringAction } from "./authoring";
+import {
+  CALL_SERVICE_KIND,
+  dashboardVerdict,
+  FIRE_EVENT_KIND,
+  serviceCallVerdict,
+} from "./auto-approval";
 import type { HATarget, HomeAssistantAction } from "./homeassistant";
 
 export { resolveTargets };
@@ -111,7 +117,7 @@ export function describeAction(
     case "fireEvent":
       return describeFireEvent(action);
     case "saveDashboard":
-      return describeSaveDashboard(action);
+      return describeSaveDashboard(action, registry);
   }
 }
 
@@ -132,6 +138,8 @@ function describeCallService(
         `This indicates a programming error in the gadget that called callService(); ` +
         `it likely passed a single options object instead of positional arguments.`,
       implementsRevert: false,
+      actionKind: CALL_SERVICE_KIND,
+      autoApprovable: false,
     };
   }
 
@@ -262,6 +270,7 @@ function describeCallService(
     title: sanitizeTitle(title),
     ...builder.finish(),
     implementsRevert: canRevert(action),
+    ...serviceCallVerdict(action, registry),
   };
 }
 
@@ -273,11 +282,14 @@ function describeFireEvent(action: HomeAssistantAction & { type: "fireEvent" }):
     title: sanitizeTitle(`Fire event: ${action.eventType}`),
     ...builder.finish(),
     implementsRevert: false,
+    actionKind: FIRE_EVENT_KIND,
+    autoApprovable: false,
   };
 }
 
 function describeSaveDashboard(
   action: HomeAssistantAction & { type: "saveDashboard" },
+  registry: RegistrySnapshot,
 ): ActionDescription {
   const config = action.config as { title?: string; views?: unknown[] } | undefined;
   const urlLabel = action.urlPath ?? "lovelace (default)";
@@ -294,6 +306,7 @@ function describeSaveDashboard(
       .json("Dashboard configuration", action.config)
       .finish(),
     implementsRevert: true,
+    ...dashboardVerdict(action.config, registry),
   };
 }
 

@@ -10,6 +10,12 @@ const SEPARATOR = "/";
  * (a folder an observer must be able to list, an inbox no collaborator may ever see) is decided by
  * the gatekeeper's `verifyObserverAccess()` when it reads the ID back, and many resources may map to
  * one check. Nesting implies no access inheritance either way.
+ *
+ * Cloud IDs, workspace URLs, and similar provider-instance identifiers are tenant identities.
+ * Include a tenant fragment in a child resource's path if and only if the tenant is not permanently
+ * fixed by the deployed Worker's configuration. Account or facet scoping, or one OAuth app, does not
+ * establish that. A deployment-fixed tenant is implicit in trusted configuration and must remain
+ * stable while historical requirements exist; omitting its prefix does not omit membership checks.
  */
 export type SubresourceFragment = {
   /** The resource's kind, such as `file` or `inbox`. */
@@ -38,9 +44,10 @@ export type SubresourceId = {
  * requirements by string, so describe one resource with the same fragments in the same order
  * everywhere it is reported.
  *
- * The Workshop refuses an observation carrying an ID over 512 UTF-16 code units, and escaping can
- * lengthen a component up to ninefold (a three-byte UTF-8 character becomes nine), so a resource
- * whose provider id approaches that needs a shorter identity.
+ * The Workshop refuses an observation carrying an ID over 2048 UTF-16 code units (every bound is in
+ * `ObservationDescription.subresources`), and escaping can lengthen a component up to ninefold (a
+ * three-byte UTF-8 character becomes nine), so a resource whose provider id approaches that needs a
+ * shorter identity.
  * @param value Namespace and fragments.
  * @returns The encoded ID.
  * @throws Error when the namespace is empty, there are no fragments, a fragment's name or id is

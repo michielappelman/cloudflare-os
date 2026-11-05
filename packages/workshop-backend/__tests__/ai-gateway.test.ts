@@ -179,16 +179,17 @@ describe("GatewayModels", () => {
           .map(({ provider }) => provider);
 
   it("names the model Auto Router routed to in any mode, matching dotted versions", () => {
-    const haiku = {
-      provider: "anthropic" as const, id: "claude-haiku-5-5", name: "Haiku 5.5",
+    // An admin-added model, not one of the catalog's.
+    const added = {
+      provider: "anthropic" as const, id: "claude-next-5-6", name: "Next 5.6",
       contextWindow: 400000,
     };
     const models = gatewayModels({
-      addedModels: [haiku],
-      modelModes: { "claude-haiku-5-5": "hidden", "claude-opus-5-5": "disabled" },
+      addedModels: [added],
+      modelModes: { "claude-next-5-6": "hidden", "claude-opus-5-5": "disabled" },
     });
     // The gateway reports dotted versions; the models are keyed with dashes.
-    expect(models.routedModelName("anthropic/claude-haiku-5.5")).toBe("Haiku 5.5");
+    expect(models.routedModelName("anthropic/claude-next-5.6")).toBe("Next 5.6");
     expect(models.routedModelName("anthropic/claude-opus-5.5")).toBe("Claude Opus 5.5");
     expect(models.routedModelName("anthropic/claude-sonnet-5-5")).toBe("Claude Sonnet 5.5");
     expect(models.routedModelName("anthropic/not-a-model")).toBeUndefined();
@@ -290,7 +291,8 @@ describe("GatewayModels", () => {
       mode: "enabled", defaultMode: "enabled", added: true,
     });
     const listed = ids(models.list("language"));
-    expect(listed.indexOf("claude-test")).toBe(listed.indexOf("claude-haiku-4-5") + 1);
+    // Haiku 4.5 is hidden, so the last Anthropic catalog model the pickers list is Fable 5.1.
+    expect(listed.indexOf("claude-test")).toBe(listed.indexOf("claude-fable-5-1") + 1);
     expect(listed.indexOf("claude-test-2")).toBe(listed.indexOf("claude-test") + 1);
   });
 

@@ -129,7 +129,7 @@ describe("descriptions", () => {
   it("never makes destructive or privileged changes auto-approvable", () => {
     for (const name of ["dns.records.delete", "accounts.tokens.create"]) {
       const description = describeChange(call(name));
-      expect(description.autoApprovable).toBeUndefined();
+      expect(description.autoApprovable).toBe(false);
       expect(description.actionKind).toBeUndefined();
     }
   });
