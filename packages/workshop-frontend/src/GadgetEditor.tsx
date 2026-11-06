@@ -1188,8 +1188,8 @@ export default function GadgetEditor() {
     })
   }, [showChatParam, id, navigate, setWorkspaceVisibility, exitGadgetFullscreen])
 
-  // Notifications skip the chat on screen: rendered, and not covered by full-screen preview or, on a
-  // phone, by the workspace pane.
+  // Notifications and read receipts apply only to the chat on screen, not one covered by a
+  // full-screen preview or, on a phone, by the workspace pane.
   useEffect(() => {
     if (!chatRendered || isGadgetFullscreen || effectiveSelectedChatId === null) return
     const chat = { workspaceId: id!, chatId: effectiveSelectedChatId }
@@ -2036,14 +2036,15 @@ export default function GadgetEditor() {
 
         {/* ── Resize handle ───────────────────────────────────────────────────── */}
         <div
-          className={`relative flex-shrink-0 touch-none cursor-col-resize overflow-visible bg-kumo-line max-md:hidden ${workspaceTransitionClass}`}
+          className={`relative z-10 flex-shrink-0 touch-none cursor-col-resize overflow-visible bg-kumo-line max-md:hidden ${workspaceTransitionClass}`}
           style={{ width: showFullEditor ? 1 : 0 }}
           onPointerDown={handleResizePointerDown}
           onPointerMove={handleResizePointerMove}
           onPointerUp={handleResizePointerUp}
           onPointerCancel={handleResizePointerUp}
         >
-          <div className="absolute inset-y-0 -left-2 -right-2" />
+          {/* Widened only to the right: the chat pane's scrollbar sits just left of the handle. */}
+          {showFullEditor && <div className="absolute inset-y-0 left-0 -right-3" />}
         </div>
 
         {/* ── RIGHT: App / Code / Connections tabs ───────────────────────────── */}

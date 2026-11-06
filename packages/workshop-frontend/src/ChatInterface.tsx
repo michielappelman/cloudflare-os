@@ -1,4 +1,9 @@
 import { logRpcFailure, rpcFailureDescription } from "./rpcErrors";
+import { useUnreadState } from "./features/notifications/UnreadStateBridge";
+import { UnreadBadge } from "./features/notifications/UnreadBadge";
+import { ReadTimeline } from "./features/notifications/ReadTimeline";
+import { TimelineReadItem } from "./features/notifications/TimelineReadItem";
+import { timelineReadRanges } from "./features/notifications/timelineReadRanges";
 import {
   Fragment,
   isValidElement,
@@ -1862,6 +1867,7 @@ type ChatDisplayEntry =
   | {
       type: "workRun";
       key: string;
+      firstSequence: number;
       toolCalls: AiToolCall[];
       observations: ObservationChatMessage[];
       toolCallGroups: ToolCallGroup[];
@@ -2237,6 +2243,7 @@ export function buildChatDisplayEntries(
       result.push({
         type: "workRun",
         key: `work-${msg.chatId}-${msg.sequence}`,
+        firstSequence: msg.sequence,
         toolCalls: workParts.toolCalls,
         observations: workParts.observations,
         toolCallGroups: buildToolCallGroups(
@@ -2743,6 +2750,7 @@ function ChatInterface({
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
   const { currentUser } = useAuthenticatedApi();
+  const unread = useUnreadState();
   const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -2993,6 +3001,13 @@ function ChatInterface({
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isScrolledToBottomRef = useRef(true);
 
+  // Where the chat list was scrolled to. Without the sidebar, opening a thread replaces the list,
+  // so the list starts from this when the user comes back.
+  const chatListScrollTopRef = useRef(0);
+  const restoreChatListScroll = useCallback((el: HTMLDivElement | null) => {
+    if (el) el.scrollTop = chatListScrollTopRef.current;
+  }, []);
+
   const scrollMessagesToBottom = useCallback(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
@@ -3170,6 +3185,13 @@ function ChatInterface({
   const currentChatMetadata =
     selectedChatId !== null ? cacheRef.current.chats.get(selectedChatId) : null;
   const queuedSteers = currentChatMetadata?.queuedSteers;
+
+  // A rendered item owns the bookkeeping following it too, so collapsed work/checkpoints
+  // cannot leave an uncleareable badge. Compaction/model labels aren't independently read items.
+  const timelineStarts = displayEntries.map(entry =>
+    entry.type === "workRun" ? entry.firstSequence : "message" in entry ?
+      (entry.type === "message" ? entry.slashCommand?.sequence : undefined) ?? entry.message.sequence : undefined);
+  const timelineRanges = timelineReadRanges(timelineStarts, currentMessages);
 
   // Hide the user name on user message rows when the only human in the chat is the
   // currently-logged-in user (it would just say "you" on every message). If anyone else has ever
@@ -3374,6 +3396,12 @@ function ChatInterface({
     // Approaching the top pulls in the previous page, so a compacted thread reads as one continuous
     // scroll rather than making the user ask for their own history.
     if (el.scrollTop <= EARLIER_PAGE_PREFETCH_PX) loadEarlierRef.current();
+  }, []);
+
+  const handleUnreadNavigation = useCallback((pending: boolean) => {
+    const el = messagesContainerRef.current;
+    isScrolledToBottomRef.current = !pending && !!el &&
+      el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
   }, []);
 
   useLayoutEffect(() => {
@@ -5378,7 +5406,11 @@ function ChatInterface({
         </DropdownMenu>
       </div>
       {/* Chat list */}
-      <div className="chat-panel flex-1 overflow-y-auto bg-kumo-base p-3">
+      <div
+        ref={restoreChatListScroll}
+        onScroll={(e) => { chatListScrollTopRef.current = e.currentTarget.scrollTop; }}
+        className="chat-panel flex-1 overflow-y-auto bg-kumo-base p-3"
+      >
         {!chatListReady ? (
           <div className="flex items-center justify-center py-10">
             <div className="w-5 h-5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
@@ -5415,6 +5447,8 @@ function ChatInterface({
               <div key={chat.id} className="relative">
                 {(() => {
                   const isRenaming = renamingChatId === chat.id;
+                  const unreadMessageCount = unread?.chats?.find(item =>
+                    item.workspaceId === workspaceId && item.chatId === chat.id)?.unreadMessageCount ?? 0;
                   return (
                   <div
                     onClick={isRenaming ? undefined : () => onNavigateToChat(chat.id)}
@@ -5501,6 +5535,9 @@ function ChatInterface({
                       </div>
                     </div>
                     {!isRenaming && (
+                      <UnreadBadge count={unreadMessageCount} />
+                    )}
+                    {!isRenaming && (
                       <DropdownMenu>
                         <DropdownMenu.Trigger
                           render={
@@ -5517,6 +5554,12 @@ function ChatInterface({
                           onClick={(event) => event.stopPropagation()}
                           className="themed-floating-shadow !z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1"
                         >
+                          <DropdownMenu.Item disabled={!unread?.chats || unreadMessageCount === 0} onClick={() => {
+                            void unread?.markRead(overseer, chat.id).catch(() => {});
+                          }}>Mark thread read</DropdownMenu.Item>
+                          <DropdownMenu.Item disabled={!unread?.chats || unreadMessageCount > 0} onClick={() => {
+                            void unread?.markUnread(overseer, chat.id).catch(() => {});
+                          }}>Mark thread unread</DropdownMenu.Item>
                           <DropdownMenu.Item
                             icon={<Pencil className="size-3" />}
                             onClick={() => startListRename(chat.id, chat.title)}
@@ -5602,7 +5645,8 @@ function ChatInterface({
             onPointerUp={handleSidebarPointerUp}
             onPointerCancel={handleSidebarPointerUp}
           >
-            <div className="absolute inset-y-0 -left-1 -right-1" />
+            {/* Widened only to the right: the chat list's scrollbar sits just left of the handle. */}
+            <div className="absolute inset-y-0 left-0 -right-2" />
           </div>
         </>
       )}
@@ -5733,7 +5777,17 @@ function ChatInterface({
                     <div className="w-5 h-5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
                   </div>
                 ) : (
-                  <div
+                  <ReadTimeline
+                    key={`${workspaceId}:${selectedChatId}`}
+                    workspaceId={workspaceId}
+                    overseer={overseer}
+                    chatId={selectedChatId}
+                    container={messagesContainerRef}
+                    oldestSequence={oldestLoadedSequence}
+                    latestSequence={currentMessages.at(-1)?.sequence ?? -1}
+                    loadingEarlier={isLoadingEarlier}
+                    loadEarlier={handleShowEarlierMessages}
+                    onUnreadNavigation={handleUnreadNavigation}
                     className={`flex flex-col px-3 pt-5 sm:px-6 sm:pt-8 ${pendingConsoleLogCount > 0 ? "pb-16" : "pb-8"} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}`}
                   >
                     {isLoadingEarlier && (
@@ -6394,6 +6448,11 @@ function ChatInterface({
                         )}
                         </div>
                       );
+                    }).map((content, entryIndex) => {
+                      const range = timelineRanges[entryIndex];
+                      return range ? <TimelineReadItem key={displayEntries[entryIndex].key} {...range}>
+                        {content}
+                      </TimelineReadItem> : content;
                     })}
 
                     {currentRowBuffer && currentHasUserDraftRows && (() => {
@@ -6598,7 +6657,7 @@ function ChatInterface({
                         </div>
                       );
                     })}
-                  </div>
+                  </ReadTimeline>
                 )}
               </div>
 
