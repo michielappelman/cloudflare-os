@@ -116,10 +116,11 @@ export default function Sidebar({
       )}
 
       <SidebarWorkspacesProvider>
-        {/* Pinned top stack. shrink-0 keeps it from squishing when the lists below grow. */}
-        <div className="flex shrink-0 flex-col gap-3 pt-3">
+        {/* One scroll region for the nav and the workspace lists, so neither is pinned while the
+            other scrolls. min-h-0 lets the flex child shrink below its content and scroll. */}
+        <div className="sidebar-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pt-2">
           {/* Primary nav */}
-          <nav className="flex flex-col gap-0.5 px-2">
+          <nav className="flex flex-col px-2">
             <SidebarItem
               to="/"
               label="Home"
@@ -192,13 +193,7 @@ export default function Sidebar({
             <UnreadSummary collapsed={collapsed} />
           </nav>
 
-          {/* Workspace tools: search. Pinned so it's always reachable. */}
           <SidebarWorkspacesTools collapsed={collapsed} />
-        </div>
-
-        {/* Scrolling middle: only the Favorites / Recent workspaces / Recent blueprints lists.
-            min-h-0 lets flex children compute scroll height correctly. */}
-        <div className="sidebar-scroll mt-1 min-h-0 flex-1 overflow-y-auto">
           <SidebarWorkspacesLists collapsed={collapsed} />
         </div>
       </SidebarWorkspacesProvider>
