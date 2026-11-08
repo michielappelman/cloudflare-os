@@ -20,6 +20,11 @@ it("returns scripted OpenAI tool and text responses while recording each request
       response: "Test Gadget",
     },
     {
+      kind: "workspace-icon",
+      prompt: "Choose one common, widely supported emoji that best represents a project",
+      response: "🧪",
+    },
+    {
       kind: "binding-name",
       prompt: "Choose a short, meaningful JavaScript identifier in ALL_CAPS_WITH_UNDERSCORES",
       response: "TEST_BINDING",

@@ -1173,7 +1173,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async recordSharedWorkspaceOpen(
       workspaceId: string, title: string, ownerProfile: AiChatAuthorInfo, role: CollaboratorRole,
-      notificationBaselines: ChatAdmissionBaseline[]
+      notificationBaselines: ChatAdmissionBaseline[], icon?: string
   ): Promise<void> {
     let record = this.storage.gadgets.get(workspaceId);
     if (record && !record.owner) {
@@ -1185,6 +1185,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       // Already tracked -- update lastActive and cached fields.
       record.lastActive = now;
       record.title = title;
+      if (icon !== undefined) record.icon = icon;
       record.owner = ownerProfile;
       record.role = role;
       this.storage.gadgets.put(record);
@@ -1193,6 +1194,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       this.storage.gadgets.put({
         id: workspaceId,
         title,
+        ...(icon !== undefined ? { icon } : {}),
         owner: ownerProfile,
         role,
         created: now,
@@ -1629,6 +1631,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error("No such workspace belonging to user.");
     }
     record.title = title;
+    this.storage.gadgets.put(record);
+  }
+
+  async updateIcon(workspaceId: string, icon: string) {
+    let record = this.storage.gadgets.get(workspaceId);
+    if (!record) {
+      throw new Error("No such workspace belonging to user.");
+    }
+    record.icon = icon;
     this.storage.gadgets.put(record);
   }
 

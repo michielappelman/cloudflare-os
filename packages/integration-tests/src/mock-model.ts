@@ -8,7 +8,7 @@ const AUXILIARY_REQUEST = z.object({
   messages: z.tuple([z.object({ role: z.literal("user"), content: z.string() })]),
 });
 
-type AuxiliaryRequestKind = "thread-title" | "gadget-title" | "binding-name";
+type AuxiliaryRequestKind = "thread-title" | "gadget-title" | "workspace-icon" | "binding-name";
 type AuxiliaryCompletion = {
   kind: AuxiliaryRequestKind;
   promptPrefix: string;
@@ -26,6 +26,11 @@ const AUXILIARY_COMPLETIONS: AuxiliaryCompletion[] = [
     kind: "gadget-title",
     promptPrefix: "Below is the log of a chat session that led to a coding agent writing code",
     response: "Test Gadget",
+  },
+  {
+    kind: "workspace-icon",
+    promptPrefix: "Choose one common, widely supported emoji",
+    response: "🧪",
   },
   {
     kind: "binding-name",

@@ -2891,6 +2891,14 @@ export type WorkspaceMetadata = {
    */
   title: string;
 
+  /**
+   * A single common emoji representing the workspace, shown in workspace lists in place of a
+   * monogram. Chosen by the quick model whenever the workspace title is generated or renamed
+   * (see `Overseer.generateWorkspaceIcon()`). Absent until one has been chosen; clients fall back
+   * to the title's initials.
+   */
+  icon?: string;
+
   /** Total cost of AI inference in dollars, if known. */
   totalCost?: number;
 
@@ -2941,7 +2949,7 @@ export type WorkspaceMetadata = {
 
   // TODO:
   // - created / modified / activity times
-  // - icon? thumbnail?
+  // - thumbnail?
 }
 
 /**

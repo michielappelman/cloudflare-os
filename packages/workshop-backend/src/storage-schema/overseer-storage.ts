@@ -1381,6 +1381,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
       title: "Untitled Workspace",
 
+      // A single emoji representing the workspace, chosen by the quick model from the title (see
+      // Overseer.generateWorkspaceIcon()). Undefined until one has been chosen.
+      icon: <string | undefined>undefined,
+
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
       // should be treated as referring to this gadget ID.
