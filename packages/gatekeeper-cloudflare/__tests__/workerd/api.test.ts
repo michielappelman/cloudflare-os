@@ -6,7 +6,8 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudflareApiGatekeeperProps } from "../../src/api-gatekeeper.js";
 import type { CloudflareApiRequest } from "../../src/api-types.js";
-import type { ApiCallOutcome } from "../worker.js";
+import type { ApiCallOutcome, TestObserver } from "../worker.js";
+import { SUPER_ADMINISTRATOR_GROUP_ID } from "../../src/membership.js";
 
 const ACCOUNT = "0123456789abcdef0123456789abcdef";
 const OTHER_ACCOUNT = "fedcba9876543210fedcba9876543210";
@@ -18,6 +19,27 @@ const USER = "7c5dae5552338874e5053f2534d2767a";
 const OTHER_USER = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
 /** What every read through a binding of ACCOUNT made by USER reports. */
 const SUBRESOURCE = `api/account/${ACCOUNT}/user/${USER}`;
+
+const ADMIN_GROUP = "201e1f6a044241d9b27fe344e1baee06";
+const DNS_GROUP = "4755a26eedb94da69e1066d98aa820be";
+
+/** One `GET /memberships` entry: `groups` held over all of `account`, or over one zone of it. */
+function membership(account: string, groups: string[], zoneOnly = false) {
+  const key = `com.cloudflare.api.account.${account}`;
+  return {
+    status: "accepted", account: { id: account },
+    policies: [{
+      access: "allow",
+      permission_groups: groups.map(id => ({ id })),
+      resource_groups: [{ scope: zoneOnly
+        ? { key, objects: [{ key: `com.cloudflare.api.account.zone.${ZONE}` }] }
+        : { key, objects: [{ key: "*" }] } }],
+    }],
+  };
+}
+
+/** What the fake `/memberships` answers, by access token. */
+let memberships: Record<string, unknown[] | null>;
 
 let userObjectId: string;
 let facets = 0;
@@ -36,6 +58,11 @@ function fakeCloudflare() {
     sent.push({ method, url, ...(typeof init.body === "string" ? { body: init.body } : {}) });
     const path = url.slice(API.length).split("?")[0];
     if (method === "GET" && path === "/user") return ok({ id: USER.toUpperCase(), email: "ann@example.com" });
+    if (method === "GET" && path === "/memberships") {
+      const token = String(new Headers(init.headers).get("Authorization")).slice("Bearer ".length);
+      const list = memberships[token];
+      return list ? ok(list, { per_page: 50 }) : new Response("down", { status: 503 });
+    }
     if (method === "GET" && path === `/zones/${ZONE}`) {
       return ok({ id: ZONE, name: "example.com", status: "active", account: { id: ACCOUNT } });
     }
@@ -99,12 +126,14 @@ beforeAll(async () => {
     state.storage.kv.put("accessToken", { token: "access-1", expires: Date.now() + 3_600_000 });
     // As learned when the credentials were installed; "who this connection is" tests the lookup.
     state.storage.kv.put("cloudflareUserId", USER);
+    state.storage.kv.put("grantedScopes", ["memberships.read"]);
   });
 });
 
 beforeEach(() => {
   record = { id: RECORD, type: "A", name: "www.example.com", content: "192.0.2.1" };
   graphqlRowTag = ZONE;
+  memberships = { "access-1": [membership(OTHER_ACCOUNT, [DNS_GROUP]), membership(ACCOUNT, [ADMIN_GROUP])] };
   sent = [];
   fakeCloudflare();
 });
@@ -262,7 +291,7 @@ describe("Cloudflare API binding", () => {
 });
 
 describe("who else may see a Cloudflare API binding's reads", () => {
-  const verify = (binding: CloudflareApiGatekeeperProps, users: Record<string, string>, ids: string[]) =>
+  const verify = (binding: CloudflareApiGatekeeperProps, users: Record<string, TestObserver>, ids: string[]) =>
     hooks().apiVerifyObservers(`api-${facets++}`, binding, users, ids);
 
   it("reports the subresource on GraphQL reads and on the result of an approved change", async () => {
@@ -283,8 +312,39 @@ describe("who else may see a Cloudflare API binding's reads", () => {
     expect(result.observations.map(o => o.subresources)).toEqual([[SUBRESOURCE]]);
   });
 
-  it("allows only an observer whose own connection is the same Cloudflare user", async () => {
-    expect(await verify(props(), { same: USER, other: OTHER_USER }, [SUBRESOURCE])).toEqual(["same"]);
+  it("allows an observer whose own connection is the same Cloudflare user, asking nothing more", async () => {
+    expect(await verify(props(), { same: USER }, [SUBRESOURCE])).toEqual(["same"]);
+    expect(sent.filter(r => r.url.includes("/memberships"))).toEqual([]);
+  });
+
+  it("allows another member only when their access to the account covers the connection's", async () => {
+    const observers: Record<string, TestObserver> = {
+      same: USER,
+      sameGroups: { user: OTHER_USER, membership: { groups: [ADMIN_GROUP] } },
+      more: { user: OTHER_USER, membership: { groups: [ADMIN_GROUP, DNS_GROUP].toSorted() } },
+      superAdmin: { user: OTHER_USER, membership: { groups: [SUPER_ADMINISTRATOR_GROUP_ID] } },
+      less: { user: OTHER_USER, membership: { groups: [DNS_GROUP] } },
+      scoped: { user: OTHER_USER, membership: "scoped" },
+      notMember: { user: OTHER_USER, membership: "none" },
+      noScope: { user: OTHER_USER, membership: "unreadable" },
+    };
+    expect(await verify(props(), observers, [SUBRESOURCE]))
+      .toEqual(["same", "sameGroups", "more", "superAdmin"]);
+  });
+
+  it("keeps a read made as another Cloudflare user with that user, whatever the roles", async () => {
+    const earlier = `api/account/${ACCOUNT}/user/${OTHER_USER}`;
+    const third = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    expect(await verify(props(), {
+      thatUser: { user: OTHER_USER, membership: "none" },
+      superAdmin: { user: third, membership: { groups: [SUPER_ADMINISTRATOR_GROUP_ID] } },
+    }, [earlier])).toEqual(["thatUser"]);
+  });
+
+  it("fails the whole call when either membership cannot be read", async () => {
+    expect(await verify(props(), {
+      broken: { user: OTHER_USER, membership: "!memberships exploded" },
+    }, [SUBRESOURCE])).toContain("memberships exploded");
   });
 
   it("fails the whole call when an observer's user cannot be told", async () => {
@@ -314,6 +374,49 @@ describe("who else may see a Cloudflare API binding's reads", () => {
     const binding = props({ reportsSubresources: true });
     expect(await hooks().apiAddObserver(facet, binding)).toBeNull();
     expect(await hooks().apiHistory(facet, binding)).toEqual([]);
+  });
+});
+
+describe("what a connection may do in an account", () => {
+  const seed = async (name: string, token: string, scopes: string[]) => {
+    const account = env.USER_ACCOUNT.get(env.USER_ACCOUNT.idFromName(name));
+    await runInDurableObject(account, (_account, state) => {
+      state.storage.kv.put("refreshToken", `refresh-${name}`);
+      state.storage.kv.put("accessToken", { token, expires: Date.now() + 3_600_000 });
+      state.storage.kv.put("grantedScopes", scopes);
+    });
+    return account;
+  };
+
+  it("reads whole-account permission groups, once per account while fresh", async () => {
+    memberships.t1 = [membership(ACCOUNT, [DNS_GROUP.toUpperCase(), ADMIN_GROUP])];
+    const account = await seed("member-1", "t1", ["memberships.read"]);
+    expect(await account.getAccountMembership(ACCOUNT)).toEqual({ groups: [ADMIN_GROUP, DNS_GROUP] });
+    expect(await account.getAccountMembership(ACCOUNT.toUpperCase())).toEqual({ groups: [ADMIN_GROUP, DNS_GROUP] });
+    expect(sent.filter(r => r.url.includes("/memberships"))).toHaveLength(1);
+    expect(await account.getAccountMembership(OTHER_ACCOUNT)).toBe("none");
+  });
+
+  it("does not rank a zone-scoped, pending or unknown-shaped membership", async () => {
+    memberships.t2 = [
+      membership(ACCOUNT, [ADMIN_GROUP], true),
+      { ...membership(OTHER_ACCOUNT, [ADMIN_GROUP]), status: "pending" },
+    ];
+    const account = await seed("member-2", "t2", ["memberships.read"]);
+    expect(await account.getAccountMembership(ACCOUNT)).toBe("scoped");
+    expect(await account.getAccountMembership(OTHER_ACCOUNT)).toBe("none");
+  });
+
+  it("does not ask without memberships.read, and throws rather than guess when Cloudflare fails", async () => {
+    const telemetryOnly = await seed("member-3", "t3", ["workers-observability.read"]);
+    expect(await telemetryOnly.getAccountMembership(ACCOUNT)).toBe("unreadable");
+    expect(sent.filter(r => r.url.includes("/memberships"))).toEqual([]);
+
+    memberships.t4 = null;
+    const down = await seed("member-4", "t4", ["memberships.read"]);
+    const failure = await runInDurableObject(down,
+      account => account.getAccountMembership(ACCOUNT).then(() => null, e => String(e)));
+    expect(failure).toContain("Could not read this connection's Cloudflare memberships");
   });
 });
 

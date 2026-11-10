@@ -15,7 +15,8 @@ import {
   getOAuthConfig, buildAuthorizeUrl, generatePkce, exchangeCode, refreshTokens, isGrantDeath,
   AUTH_SCOPES, BILLING_SCOPES, persistentScopesForResources,
 } from "./oauth";
-import { fetchIdentity } from "./cloudflare-api";
+import { fetchAccountMembership, fetchIdentity } from "./cloudflare-api";
+import type { AccountMembership } from "./membership.js";
 import {
   OBSERVABILITY_RESOURCES,
   ACCOUNT_OBSERVABILITY_RESOURCE,
@@ -86,6 +87,11 @@ const ACCESS_TOKEN_EXPIRY_SAFETY_MS = 60 * 1000;
 // new grant is noticed soon.
 const TELEMETRY_ACCESS_ALLOWED_TTL_MS = 15 * 60_000;
 const TELEMETRY_ACCESS_DENIED_TTL_MS = 15_000;
+// How long a membership answer is reused. Short: a role removed in Cloudflare should stop a
+// collaborator seeing new reads within minutes, and the question is one request.
+const MEMBERSHIP_TTL_MS = 5 * 60_000;
+/** The scope `GET /memberships` needs. Part of the API grant, not of telemetry-only connections. */
+const MEMBERSHIPS_SCOPE = "memberships.read";
 
 // Official Cloudflare logomark (orange cloud on a transparent background), as a data URI so it can
 // be rendered directly as the vendor/account avatar.
@@ -274,6 +280,10 @@ export class UserAccount extends DurableObject<Env> {
   readonly #access = new KvTtlCache(this.ctx.storage.kv,
     () => this.hasRefreshToken() ? "connected" : undefined, { name: "access" });
 
+  // This account's own memberships (see getAccountMembership), invalidated like #access.
+  readonly #memberships = new KvTtlCache(this.ctx.storage.kv,
+    () => this.hasRefreshToken() ? "connected" : undefined, { name: "memberships" });
+
   #config() {
     const config = getOAuthConfig(this.env.CLIENT_ID, this.env.CLIENT_SECRET, getBaseUrl(this.env));
     if (!config) throw new Error("The Cloudflare Gatekeeper is not configured.");
@@ -409,6 +419,7 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put<StoredAccessToken>("accessToken", grant.accessToken);
     this.ctx.storage.kv.put<string[]>("grantedScopes", grant.grantedScopes);
     this.#access.invalidateAll();
+    this.#memberships.invalidateAll();
     // A reconnect can be as another Cloudflare user.
     this.ctx.storage.kv.delete(USER_ID_KEY);
   }
@@ -468,6 +479,30 @@ export class UserAccount extends DurableObject<Env> {
       throw new Error("This Cloudflare connection was reconnected while its access was being checked.");
     }
     return allowed;
+  }
+
+  /**
+   * What the connected Cloudflare user may do in `accountId`, for comparing two members of one
+   * account (see membershipCovers). Reused for MEMBERSHIP_TTL_MS. `"unreadable"` when the grant
+   * lacks `memberships.read`, which only connections with the API resource have. Throws when the
+   * connection has no usable credentials, Cloudflare does not answer, or a reconnect overtook the
+   * question: all indeterminate, never a denial.
+   */
+  async getAccountMembership(accountId: string): Promise<AccountMembership> {
+    const generation = this.#grantGeneration;
+    const token = await this.getAccessToken();
+    if (!token) throw new Error("This Cloudflare connection has no usable credentials.");
+    if (!(await this.getGrantedScopes()).includes(MEMBERSHIPS_SCOPE)) return "unreadable";
+    const membership = await this.#memberships.cached(accountId.toLowerCase(), MEMBERSHIP_TTL_MS,
+      async () => {
+        const live = await this.getAccessToken();
+        if (!live) throw new Error("This Cloudflare connection has no usable credentials.");
+        return fetchAccountMembership(live, accountId);
+      });
+    if (this.#grantGeneration !== generation) {
+      throw new Error("This Cloudflare connection was reconnected while its access was being checked.");
+    }
+    return membership;
   }
 
   /**
@@ -714,6 +749,11 @@ export interface CloudflareVerifierApi extends GatekeeperUserVerifier {
    * resource. Throws when it cannot be told, which is indeterminate, not a denial.
    */
   cloudflareUserId(): Promise<string>;
+  /**
+   * What the observer's own Cloudflare user may do in `accountId`, for the Cloudflare API resource
+   * (see UserAccount.getAccountMembership). Throws when it cannot be told.
+   */
+  accountMembership(accountId: string): Promise<AccountMembership>;
 }
 
 /** Verifies an observer's access using that observer's own Cloudflare credentials. */
@@ -734,6 +774,11 @@ export class CloudflareVerifier extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async cloudflareUserId(): Promise<string> {
     const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     return this.ctx.exports.UserAccount.get(id).getCloudflareUserId();
+  }
+
+  async accountMembership(accountId: string): Promise<AccountMembership> {
+    const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    return this.ctx.exports.UserAccount.get(id).getAccountMembership(accountId);
   }
 }
 

@@ -5,6 +5,7 @@
 // `ctx.exports.X({props})` is only reachable through `ctx.facets`, which is the same way the overseer
 // instantiates a gatekeeper in production.
 
+import type { AccountMembership } from "../src/membership.js";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
   ActionDescription, GatekeeperUserVerifier, GitCache, GitObjectType, GitOid, ObservationDescription,
@@ -110,13 +111,28 @@ export type ApiCallOutcome = {
   submissions: Array<{ id: number; description: ActionDescription }>;
 };
 
+/**
+ * An observer in a test: its Cloudflare user id, and optionally its membership of the bound
+ * account (default: not a member). A string starting with "!" makes that question throw.
+ */
+export type TestObserver = string | { user: string; membership: AccountMembership | `!${string}` };
+
 /** Stands in for an observer's verifier, as the Cloudflare API resource asks it. */
 class TestUserVerifier extends RpcTarget {
   readonly #user: string;
+  readonly #membership: AccountMembership | Error;
 
-  constructor(user: string) {
+  constructor(observer: TestObserver) {
     super();
-    this.#user = user;
+    this.#user = typeof observer === "string" ? observer : observer.user;
+    const membership = typeof observer === "string" ? "none" : observer.membership;
+    this.#membership = typeof membership === "string" && membership.startsWith("!")
+      ? new Error(membership.slice(1)) : membership as AccountMembership;
+  }
+
+  async accountMembership(_accountId: string): Promise<AccountMembership> {
+    if (this.#membership instanceof Error) throw this.#membership;
+    return this.#membership;
   }
 
   async cloudflareUserId(): Promise<string> {
@@ -163,7 +179,7 @@ export class TestHooks extends DurableObject<Env> {
    */
   async apiVerifyObservers(
     facetName: string, props: CloudflareApiGatekeeperProps,
-    users: Record<string, string>, subresources: string[],
+    users: Record<string, TestObserver>, subresources: string[],
   ): Promise<string[] | string> {
     const observers = Object.entries(users).map(([id, user]) => ({
       id, verifier: new RpcStub(new TestUserVerifier(user)) as unknown as Fetcher<GatekeeperUserVerifier>,

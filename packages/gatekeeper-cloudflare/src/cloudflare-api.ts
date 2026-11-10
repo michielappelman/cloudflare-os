@@ -3,6 +3,7 @@
 
 import { VENDOR_ID } from "./vendor.js";
 import { obsContext } from "./observability.js";
+import { parseMembership, type AccountMembership, type RawMembership } from "./membership.js";
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 
@@ -68,6 +69,32 @@ export async function fetchIdentity(token: string): Promise<CloudflareIdentity |
     email: r.email,
     displayName: name || r.email.split("@")[0],
   };
+}
+
+// Bounds the walk at 500 memberships, for the same reason as MAX_ACCOUNT_PAGES below.
+const MEMBERSHIPS_PER_PAGE = 50;
+const MAX_MEMBERSHIP_PAGES = 10;
+
+/**
+ * The token's user's access to `accountId`, from `GET /memberships` (requires `memberships.read`).
+ * Throws when Cloudflare does not answer or the walk is cut short: not finding the account in an
+ * incomplete list is not knowing, and must not read as "not a member".
+ */
+export async function fetchAccountMembership(token: string, accountId: string): Promise<AccountMembership> {
+  const wanted = accountId.toLowerCase();
+  for (let page = 1; page <= MAX_MEMBERSHIP_PAGES; page++) {
+    const query = new URLSearchParams({ page: String(page), per_page: String(MEMBERSHIPS_PER_PAGE) });
+    const envelope = await cfRequest<RawMembership[]>(token, `/memberships?${query}`);
+    if (!envelope?.result || !Array.isArray(envelope.result)) {
+      throw new Error("Could not read this connection's Cloudflare memberships.");
+    }
+    const found = envelope.result.find(entry =>
+      typeof entry.account?.id === "string" && entry.account.id.toLowerCase() === wanted);
+    if (found) return parseMembership(found, wanted);
+    const perPage = envelope.result_info?.per_page ?? MEMBERSHIPS_PER_PAGE;
+    if (envelope.result.length < perPage) return "none";
+  }
+  throw new Error("This connection has too many Cloudflare memberships to check.");
 }
 
 export interface CloudflareAccount {

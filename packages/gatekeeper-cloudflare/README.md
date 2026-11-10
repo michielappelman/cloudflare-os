@@ -200,9 +200,25 @@ sees them. Operations whose whole answer is a credential are blocked rather than
 Every read through an API binding reports the subresource
 `api/account/<accountId>/user/<Cloudflare user id>`: the account, as the member who connected it sees
 it. A binding can span every product in an account and a member's role may cover only some of them,
-so no check of another member proves they could read what a read returned. A collaborator is
-therefore admitted only when their own Cloudflare connection is that same Cloudflare user. A
-connection made before reads reported this keeps refusing every collaborator.
+so no single probe of another member proves they could read what a read returned. A collaborator
+is admitted when their own Cloudflare connection is that same Cloudflare user, or when their
+membership of the account covers the connecting member's, compared from `GET /memberships` on both
+connections (`src/membership.ts`):
+
+- the collaborator is a Super Administrator of the account, or holds every permission group the
+  connecting member holds;
+- both hold their groups over the whole account. A membership with a zone-scoped or deny policy is
+  not ranked, on either side, and admits nobody but the same user;
+- the collaborator's connection has `memberships.read`, which only a connection granted the API
+  resource has. One connected for telemetry alone is refused until it reconnects with the API
+  resource.
+
+So an Administrator cannot open a gadget a Super Administrator connected, and the reverse works.
+Both memberships are compared as they are now and cached for 5 minutes per connection: access
+removed in Cloudflare can still admit a collaborator for that long, and a connecting member whose
+role was reduced after a read is compared at the reduced role. A read made before the connection
+was reconnected as another Cloudflare user stays visible to the earlier user only. A connection
+made before reads reported this keeps refusing every collaborator.
 
 ### GraphQL Analytics
 

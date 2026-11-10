@@ -10,6 +10,7 @@
 // Reads are recorded as observations. Changes are staged and only sent from `applyAction()`, which
 // runs the same checks again: a zone can move between accounts while a change waits.
 
+import { membershipCovers, type AccountMembership } from "./membership.js";
 import { DurableObject, RpcStub } from "cloudflare:workers";
 import { observerAccessVerifier } from "@gadgets/gatekeeper-kit/observers";
 import { validateRpc } from "capnweb-validate";
@@ -135,15 +136,26 @@ export class CloudflareApiGatekeeper
    * Who else may see what this binding read. A binding can span every product in an account, and a
    * member's Cloudflare role may cover only some of them, so no check of another member proves they
    * could read everything a read returned. Every read therefore reports the account as the
-   * connection's own Cloudflare user sees it (see apiSubresourceId), and an observer passes only
-   * when their own connection is that same Cloudflare user. An ID this binding never reports, the
-   * telemetry resource's included, fails the whole call.
+   * connection's own Cloudflare user sees it (see apiSubresourceId). An observer passes when their
+   * own connection is that same Cloudflare user, or when their membership of the account covers
+   * this connection's: a Super Administrator, or every permission group it holds, all over the
+   * whole account (see membershipCovers). The second rule compares the two memberships as they are
+   * now and applies only to reads this connection's current user made; a read reported under
+   * another user (the connection has since been reconnected as someone else) stays with that user.
+   * An ID this binding never reports, the telemetry resource's included, fails the whole call.
    */
   readonly #verifyObserverAccess = observerAccessVerifier({
     hasCollectionAccess: async (verifier: Fetcher<CloudflareVerifierApi>, subresources: readonly string[]) => {
       const reported = subresources.map(parseApiSubresourceId);
       const observer = await verifier.cloudflareUserId();
-      return reported.map(({ userId }) => userId === observer);
+      if (reported.every(({ userId }) => userId === observer)) return reported.map(() => true);
+      // Both asked at most once per observer: every ID is for the bound account.
+      const { accountId } = this.ctx.props;
+      const [owner, own, theirs] = await Promise.all([
+        this.#api.cloudflareUserId(), this.#api.membership(), verifier.accountMembership(accountId),
+      ]);
+      const covered = membershipCovers(theirs, own);
+      return reported.map(({ userId }) => userId === observer || (userId === owner && covered));
     },
   });
 
@@ -233,9 +245,21 @@ export class CloudflareApiHost {
    * reported as that user.
    */
   async subresource(): Promise<string> {
+    return apiSubresourceId(this.ctx.props.accountId, await this.cloudflareUserId());
+  }
+
+  /** The Cloudflare user this binding's connection belongs to now. */
+  cloudflareUserId(): Promise<string> {
     const account = this.ctx.exports.UserAccount.get(
       this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
-    return apiSubresourceId(this.ctx.props.accountId, await account.getCloudflareUserId());
+    return account.getCloudflareUserId();
+  }
+
+  /** What this binding's connection may do in the bound account now. */
+  membership(): Promise<AccountMembership> {
+    const account = this.ctx.exports.UserAccount.get(
+      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    return account.getAccountMembership(this.ctx.props.accountId);
   }
 
   /** How descriptions name this binding. */
