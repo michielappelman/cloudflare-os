@@ -83,6 +83,17 @@ grant.
   renames one. Review new read-only POSTs individually: a "query" can write (`d1.query`).
 - Gated by `ENABLE_API_RESOURCE`, including the scopes a "connect all" requests, so a deployment whose
   OAuth client does not allow `API_SCOPES` keeps working.
+- Observers: every read (REST, GraphQL, the schema, a zone lookup, the stored result of an approved
+  change) goes through the session's one `#observe`, which reports
+  `api/account/<accountId>/user/<Cloudflare user id>`: what a read of an account returns depends on
+  that member's roles, so the user is part of the resource and no probe of another member can
+  stand in for it. `verifyObserverAccess` allows an observer only when their own connection is that
+  same Cloudflare user (`CloudflareVerifier.cloudflareUserId`), and refuses any other ID, the
+  telemetry resource's `account/<id>` included. The user id is learned from `/user` once per
+  install of credentials (`UserAccount.getCloudflareUserId`, cleared in `#writeGrant`); a
+  connection that cannot say fails the read rather than report a guess. Bindings minted since
+  carry `reportsSubresources` and have a no-op `addObserver`; older ones keep refusing every
+  collaborator and export that ID as their history.
 - GraphQL (`api-graphql.ts`) cannot reuse the path checks, so it parses the query, rewrites each
   `zones` / `accounts` filter to a literal, and tags every scoped selection so each response row is
   checked. Widening the accepted shape (fragments, directives, more filter keys) needs the same

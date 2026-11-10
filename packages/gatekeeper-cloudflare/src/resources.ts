@@ -111,6 +111,42 @@ export function parseObservabilitySubresourceId(id: string): string {
   throw new Error("Not a Cloudflare Workers Observability subresource.");
 }
 
+// The Cloudflare API resource's reads get a namespace of their own, so an ID from one resource can
+// never be read as the other's: they are checked differently.
+const API_NAMESPACE = "api";
+const USER_FRAGMENT = "user";
+// How Cloudflare spells a user id, and the only spelling a subresource ID may use.
+const CANONICAL_USER_ID_PATTERN = /^[a-f\d]{32}$/;
+
+/**
+ * The subresource ID every Cloudflare API read reports: the account it read, as the Cloudflare user
+ * the connection belongs to sees it, `api/account/<accountId>/user/<userId>`. The user is part of
+ * the resource because what a read of an account returns depends on that member's roles there: two
+ * members of one account can be shown different things.
+ */
+export function apiSubresourceId(accountId: string, userId: string): string {
+  const user = userId.toLowerCase();
+  if (!CANONICAL_USER_ID_PATTERN.test(user)) throw new Error("Not a Cloudflare user id.");
+  return formatSubresourceId({
+    namespace: API_NAMESPACE,
+    fragments: [
+      { name: ACCOUNT_FRAGMENT, id: assertCloudflareAccountId(accountId) },
+      { name: USER_FRAGMENT, id: user },
+    ],
+  });
+}
+
+/** What an ID from apiSubresourceId names. Throws for any other ID, another spelling included. */
+export function parseApiSubresourceId(id: string): { accountId: string; userId: string } {
+  const { namespace, fragments: [account, user, ...rest] } = parseSubresourceId(id);
+  if (namespace === API_NAMESPACE && rest.length === 0 && account?.name === ACCOUNT_FRAGMENT &&
+      CANONICAL_ACCOUNT_ID_PATTERN.test(account.id) && user?.name === USER_FRAGMENT &&
+      CANONICAL_USER_ID_PATTERN.test(user.id)) {
+    return { accountId: account.id, userId: user.id };
+  }
+  throw new Error("Not a Cloudflare API subresource.");
+}
+
 export function workerObservabilityUrl(accountId: string, workerName: string): string {
   return `${DASHBOARD_ORIGIN}/${assertCloudflareAccountId(accountId)}/workers/services/view/` +
     `${encodeURIComponent(workerName)}/production/observability`;

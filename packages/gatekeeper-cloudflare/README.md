@@ -197,9 +197,12 @@ sees them. Operations whose whole answer is a credential are blocked rather than
 
 ### Sharing
 
-API bindings use observer strategy A: a gadget holding one can only be opened by the person who
-connected it. A member's Cloudflare role may cover fewer products than the binding, and there is no one
-check that proves a collaborator could read everything the binding has read.
+Every read through an API binding reports the subresource
+`api/account/<accountId>/user/<Cloudflare user id>`: the account, as the member who connected it sees
+it. A binding can span every product in an account and a member's role may cover only some of them,
+so no check of another member proves they could read what a read returned. A collaborator is
+therefore admitted only when their own Cloudflare connection is that same Cloudflare user. A
+connection made before reads reported this keeps refusing every collaborator.
 
 ### GraphQL Analytics
 

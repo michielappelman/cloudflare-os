@@ -6,7 +6,7 @@
 
 import { RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import type { ApprovalQueue } from "@gadgets/workshop-shared/gatekeeper";
+import type { ApprovalQueue, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { codeSpan } from "@gadgets/gatekeeper-kit/action-description";
 import { describeGraphqlRead, describeRead } from "./api-describe.js";
 import type { CloudflareApiHost, PreparedCall } from "./api-gatekeeper.js";
@@ -58,6 +58,18 @@ export class CloudflareApiSessionImpl extends RpcTarget implements CloudflareApi
   }
 
   [Symbol.dispose](): void { this.#queue[Symbol.dispose](); }
+
+  /**
+   * Authorizes a read. Every one goes through here, which is what adds the subresource it
+   * disclosed (see CloudflareApiHost.subresource): the description's own type leaves the field
+   * out, so no caller can report a different one or none.
+   */
+  async #observe(description: Omit<ObservationDescription, "subresources">): Promise<void> {
+    const observation: ObservationDescription & { subresources: string[] } = {
+      ...description, subresources: [await this.#host.subresource()],
+    };
+    await this.#queue.authorizeObservation(observation);
+  }
 
   async scope(): Promise<CloudflareApiScope> {
     const binding = this.#host.binding;
@@ -152,7 +164,7 @@ export class CloudflareApiSessionImpl extends RpcTarget implements CloudflareApi
       };
     }
     const response = await this.#host.read(call);
-    await this.#queue.authorizeObservation(describeRead(call, countOf(response.result)));
+    await this.#observe(describeRead(call, countOf(response.result)));
     return {
       status: "ok",
       result: response.result,
@@ -215,7 +227,7 @@ export class CloudflareApiSessionImpl extends RpcTarget implements CloudflareApi
       }
       if (items.length >= maxItems) { truncated = true; break; }
     }
-    await this.#queue.authorizeObservation(describeRead(first!,
+    await this.#observe(describeRead(first!,
       `walked its pages and returned ${items.length} item(s)${truncated ? " (truncated)" : ""}`));
     return { items, truncated };
   }
@@ -240,7 +252,7 @@ export class CloudflareApiSessionImpl extends RpcTarget implements CloudflareApi
       case "failed":
         return { status: "failed", message: stored.error ?? `"${name}" failed.` };
       case "applied": {
-        await this.#queue.authorizeObservation({
+        await this.#observe({
           title: `Cloudflare: result of ${name}`.slice(0, 200),
           description: `Read the response to the approved call ${codeSpan(stored.operationId)} on ` +
             `the Cloudflare ${this.#host.target}.`,
@@ -257,7 +269,7 @@ export class CloudflareApiSessionImpl extends RpcTarget implements CloudflareApi
 
   async graphql(query: string, variables?: Record<string, unknown>): Promise<CloudflareGraphqlResult> {
     const { data, errors, scoped, zones } = await this.#host.graphql(query, variables);
-    await this.#queue.authorizeObservation(describeGraphqlRead(
+    await this.#observe(describeGraphqlRead(
       this.#host.target, scoped.query, scoped.variables, zones,
       scoped.introspection ? "read the schema" : errors ? "returned data with errors" : "returned data",
     ));
@@ -266,7 +278,7 @@ export class CloudflareApiSessionImpl extends RpcTarget implements CloudflareApi
 
   async describeGraphqlType(name?: string): Promise<unknown> {
     const type = await this.#host.graphqlType(name);
-    await this.#queue.authorizeObservation({
+    await this.#observe({
       title: "Cloudflare: GraphQL Analytics schema",
       description: `Read the GraphQL Analytics schema ${name ? "for one type" : "root type"} on the ` +
         `Cloudflare ${this.#host.target}.`,
@@ -289,7 +301,7 @@ export class CloudflareApiSessionImpl extends RpcTarget implements CloudflareApi
         ? `This connection covers the zone ${binding.zoneName} only.`
         : `No zone named ${wanted} in account ${binding.accountId}.`);
     }
-    await this.#queue.authorizeObservation({
+    await this.#observe({
       title: "Cloudflare: find zone",
       description: `Looked up a zone by name on the Cloudflare ${this.#host.target}.`,
       fields: [{ kind: "inline", label: "Zone", value: zone.name }],

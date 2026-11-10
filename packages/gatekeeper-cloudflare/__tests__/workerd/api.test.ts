@@ -14,6 +14,10 @@ const ZONE = "023e105f4ecef8ad9ca31a8372d0c353";
 const FOREIGN_ZONE = "99999999999999999999999999999999";
 const RECORD = "372e67954025e0ba6aaa6d586b9e0b59";
 const API = "https://api.cloudflare.com/client/v4";
+const USER = "7c5dae5552338874e5053f2534d2767a";
+const OTHER_USER = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+/** What every read through a binding of ACCOUNT made by USER reports. */
+const SUBRESOURCE = `api/account/${ACCOUNT}/user/${USER}`;
 
 let userObjectId: string;
 let facets = 0;
@@ -31,6 +35,7 @@ function fakeCloudflare() {
     const method = init.method ?? "GET";
     sent.push({ method, url, ...(typeof init.body === "string" ? { body: init.body } : {}) });
     const path = url.slice(API.length).split("?")[0];
+    if (method === "GET" && path === "/user") return ok({ id: USER.toUpperCase(), email: "ann@example.com" });
     if (method === "GET" && path === `/zones/${ZONE}`) {
       return ok({ id: ZONE, name: "example.com", status: "active", account: { id: ACCOUNT } });
     }
@@ -92,6 +97,8 @@ beforeAll(async () => {
   await runInDurableObject(env.USER_ACCOUNT.get(id), (_account, state) => {
     state.storage.kv.put("refreshToken", "refresh-1");
     state.storage.kv.put("accessToken", { token: "access-1", expires: Date.now() + 3_600_000 });
+    // As learned when the credentials were installed; "who this connection is" tests the lookup.
+    state.storage.kv.put("cloudflareUserId", USER);
   });
 });
 
@@ -113,6 +120,8 @@ describe("Cloudflare API binding", () => {
     expect(outcome.error).toBeUndefined();
     expect(outcome.result).toMatchObject({ status: "ok", result: [record] });
     expect(outcome.observations).toHaveLength(1);
+    // Every read names the account as the connection's own Cloudflare user sees it.
+    expect(outcome.observations[0]!.subresources).toEqual([SUBRESOURCE]);
     expect(outcome.submissions).toHaveLength(0);
     expect(sent.map(r => r.method)).toEqual(["GET", "GET"]);
   });
@@ -249,5 +258,79 @@ describe("Cloudflare API binding", () => {
       const outcome = await graphql(`api-${facets++}`, props({ products: ["dns"] }), query, { z: ZONE });
       expect(outcome.error).toMatch(/analytics/);
     });
+  });
+});
+
+describe("who else may see a Cloudflare API binding's reads", () => {
+  const verify = (binding: CloudflareApiGatekeeperProps, users: Record<string, string>, ids: string[]) =>
+    hooks().apiVerifyObservers(`api-${facets++}`, binding, users, ids);
+
+  it("reports the subresource on GraphQL reads and on the result of an approved change", async () => {
+    const facet = `api-${facets++}`;
+    const read = await graphql(facet, props(),
+      `{ viewer { zones(filter: { zoneTag: "${ZONE}" }) { httpRequests1dGroups(limit: 1) { sum { requests } } } } }`);
+    expect(read.error).toBeUndefined();
+    expect(read.observations.map(o => o.subresources)).toEqual([[SUBRESOURCE]]);
+
+    const staged = await call(facet, props(), "dns.records.create", {
+      path: { zone_id: ZONE }, body: { type: "A", name: "new.example.com", content: "192.0.2.2" },
+    });
+    const actionId = (staged.result as { actionId: number }).actionId;
+    // Staging returns nothing that was read, so it observes nothing.
+    expect(staged.observations).toEqual([]);
+    expect(await hooks().apiApply(facet, props(), actionId)).toBeNull();
+    const result = await actionResult(facet, props(), actionId);
+    expect(result.observations.map(o => o.subresources)).toEqual([[SUBRESOURCE]]);
+  });
+
+  it("allows only an observer whose own connection is the same Cloudflare user", async () => {
+    expect(await verify(props(), { same: USER, other: OTHER_USER }, [SUBRESOURCE])).toEqual(["same"]);
+  });
+
+  it("fails the whole call when an observer's user cannot be told", async () => {
+    expect(await verify(props(), { same: USER, broken: "!verifier exploded" }, [SUBRESOURCE]))
+      .toContain("verifier exploded");
+  });
+
+  it("refuses an ID it never reports: telemetry's, another account's, or a malformed one", async () => {
+    for (const id of [
+      `account/${ACCOUNT}`, `api/account/${OTHER_ACCOUNT}/user/${USER}`, `api/account/${ACCOUNT}`,
+      `api/account/${ACCOUNT}/user/${USER.toUpperCase()}`, "global",
+    ]) {
+      expect(await verify(props(), { same: USER }, [SUBRESOURCE, id]), id)
+        .toContain("a resource it never reported");
+    }
+  });
+
+  it("keeps refusing every collaborator on a binding from before reads reported anything", async () => {
+    const facet = `api-${facets++}`;
+    expect(await hooks().apiAddObserver(facet, props())).toContain("only be opened by the person who connected it");
+    // What that refusal protected is exported, for when the Workshop takes over the history.
+    expect(await hooks().apiHistory(facet, props())).toEqual([SUBRESOURCE]);
+  });
+
+  it("needs no admission and has no history on a binding minted since", async () => {
+    const facet = `api-${facets++}`;
+    const binding = props({ reportsSubresources: true });
+    expect(await hooks().apiAddObserver(facet, binding)).toBeNull();
+    expect(await hooks().apiHistory(facet, binding)).toEqual([]);
+  });
+});
+
+describe("who a connection is", () => {
+  it("is asked of Cloudflare once per install of credentials, and never guessed", async () => {
+    const id = env.USER_ACCOUNT.idFromName("api-identity");
+    const account = env.USER_ACCOUNT.get(id);
+    await runInDurableObject(account, (_account, state) => {
+      state.storage.kv.put("refreshToken", "refresh-1");
+      state.storage.kv.put("accessToken", { token: "access-1", expires: Date.now() + 3_600_000 });
+    });
+    expect(await account.getCloudflareUserId()).toBe(USER);
+    expect(await account.getCloudflareUserId()).toBe(USER);
+    expect(sent.filter(r => r.url.endsWith("/user"))).toHaveLength(1);
+
+    const none = env.USER_ACCOUNT.get(env.USER_ACCOUNT.idFromName("api-nobody"));
+    const failure = await runInDurableObject(none, account => account.getCloudflareUserId().then(() => null, e => String(e)));
+    expect(failure).toContain("Could not tell which Cloudflare user");
   });
 });

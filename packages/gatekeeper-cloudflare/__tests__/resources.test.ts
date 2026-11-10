@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  apiSubresourceId,
+  parseApiSubresourceId,
   ACCOUNT_OBSERVABILITY_RESOURCE,
   WORKER_OBSERVABILITY_RESOURCE,
   accountObservabilityUrl,
@@ -116,5 +118,28 @@ describe("Cloudflare observability OAuth scopes", () => {
         WORKER_OBSERVABILITY_RESOURCE.urlPattern,
       ]);
     expect(grantedObservabilityResourcePatterns([])).toEqual([]);
+  });
+});
+
+describe("Cloudflare API subresource IDs", () => {
+  const ACCOUNT = "0123456789abcdef0123456789abcdef";
+  const USER = "7c5dae5552338874e5053f2534d2767a";
+
+  it("name the account as one Cloudflare user sees it, in one spelling", () => {
+    const id = apiSubresourceId(ACCOUNT.toUpperCase(), USER.toUpperCase());
+    expect(id).toBe(`api/account/${ACCOUNT}/user/${USER}`);
+    expect(parseApiSubresourceId(id)).toEqual({ accountId: ACCOUNT, userId: USER });
+  });
+
+  it("refuse anything that is not a user or account id, and any other ID", () => {
+    expect(() => apiSubresourceId(ACCOUNT, "ann@example.com")).toThrow("Not a Cloudflare user id");
+    for (const id of [
+      `account/${ACCOUNT}`, `api/account/${ACCOUNT}`, `api/user/${USER}/account/${ACCOUNT}`,
+      `api/account/${ACCOUNT}/user/${USER}/zone/x`, `api/account/${ACCOUNT}/user/${USER.toUpperCase()}`,
+      `other/account/${ACCOUNT}/user/${USER}`, "global",
+    ]) {
+      // "global" is not a structured ID at all, and is refused before this parser's own check.
+      expect(() => parseApiSubresourceId(id), id).toThrow();
+    }
   });
 });

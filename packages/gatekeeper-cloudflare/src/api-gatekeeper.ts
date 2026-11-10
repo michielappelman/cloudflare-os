@@ -11,6 +11,7 @@
 // runs the same checks again: a zone can move between accounts while a change waits.
 
 import { DurableObject, RpcStub } from "cloudflare:workers";
+import { observerAccessVerifier } from "@gadgets/gatekeeper-kit/observers";
 import { validateRpc } from "capnweb-validate";
 import type {
   ActionKind, ApprovalQueue, Gatekeeper, GatekeeperUserVerifier, GitCache, ResourceDescription,
@@ -34,7 +35,9 @@ import { actionKindTag, isAction, tierOf, type ApiTier } from "./api-tiers.js";
 import { CloudflareApiSessionImpl } from "./api-session.js";
 import type { CloudflareApiRequest, CloudflareApiSession } from "./api-types.js";
 import API_TYPES_CODE from "./api-types.txt";
+import type { CloudflareVerifierApi } from "./cloudflare.js";
 import { obsContext } from "./observability.js";
+import { apiSubresourceId, parseApiSubresourceId } from "./resources.js";
 import { VENDOR_ID } from "./vendor.js";
 
 const logger = obsContext.createLogger({ component: "gatekeeper.cloudflare.api", vendorId: VENDOR_ID });
@@ -51,6 +54,11 @@ export type CloudflareApiGatekeeperProps = {
   zoneName?: string;
   products?: string[];
   readOnly: boolean;
+  /**
+   * Set on every binding minted since reads began reporting their subresource. Absent on older
+   * bindings, whose props an earlier version minted; see CloudflareApiGatekeeper.addObserver.
+   */
+  reportsSubresources?: true;
 };
 
 type ZoneInfo = { id: string; name: string; accountId: string; status?: string; plan?: string };
@@ -124,11 +132,52 @@ export class CloudflareApiGatekeeper
   }
 
   /**
-   * Refuses every collaborator. A binding can span every product in an account, and a member's
-   * Cloudflare role may cover only some of them, so there is no single check that proves a
-   * collaborator could read everything this binding has read.
+   * Who else may see what this binding read. A binding can span every product in an account, and a
+   * member's Cloudflare role may cover only some of them, so no check of another member proves they
+   * could read everything a read returned. Every read therefore reports the account as the
+   * connection's own Cloudflare user sees it (see apiSubresourceId), and an observer passes only
+   * when their own connection is that same Cloudflare user. An ID this binding never reports, the
+   * telemetry resource's included, fails the whole call.
+   */
+  readonly #verifyObserverAccess = observerAccessVerifier({
+    hasCollectionAccess: async (verifier: Fetcher<CloudflareVerifierApi>, subresources: readonly string[]) => {
+      const reported = subresources.map(parseApiSubresourceId);
+      const observer = await verifier.cloudflareUserId();
+      return reported.map(({ userId }) => userId === observer);
+    },
+  });
+
+  async verifyObserverAccess(
+      observers: { id: string; verifier: Fetcher<GatekeeperUserVerifier> }[],
+      subresources: string[]): Promise<{ allowedObserverIds: string[] }> {
+    if (!subresources.every(id => {
+      try {
+        return sameId(parseApiSubresourceId(id).accountId, this.ctx.props.accountId);
+      } catch {
+        return false;
+      }
+    })) {
+      throw new Error("This Cloudflare API connection was asked about a resource it never reported.");
+    }
+    return this.#verifyObserverAccess(observers, subresources);
+  }
+
+  /**
+   * A binding whose every read reported its subresource has no other history. An older one
+   * recorded nothing about what it read, so it exports what refusing every collaborator protected:
+   * the account as its own Cloudflare user sees it.
+   */
+  async getHistoricalSubresources(): Promise<string[]> {
+    if (this.ctx.props.reportsSubresources) return [];
+    return [await this.#api.subresource()];
+  }
+
+  /**
+   * Compatibility only for a binding whose every read reported its subresource. An older binding
+   * keeps refusing every collaborator, which is all that covers what it read before.
    */
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    if (this.ctx.props.reportsSubresources) return;
     throw new Error("Gadgets with a Cloudflare API connection can only be opened by the person " +
       "who connected it.");
   }
@@ -176,6 +225,18 @@ export class CloudflareApiHost {
   }
 
   get catalog(): ApiCatalog { return apiCatalog(); }
+
+  /**
+   * The subresource every read through this binding reports: the bound account, as the Cloudflare
+   * user the connection belongs to sees it. Asked of the account on every read, which answers
+   * from what it learned when the credentials were installed, so a reconnect as another user is
+   * reported as that user.
+   */
+  async subresource(): Promise<string> {
+    const account = this.ctx.exports.UserAccount.get(
+      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    return apiSubresourceId(this.ctx.props.accountId, await account.getCloudflareUserId());
+  }
 
   /** How descriptions name this binding. */
   get target(): string {

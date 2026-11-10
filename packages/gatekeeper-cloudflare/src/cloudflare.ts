@@ -51,6 +51,9 @@ const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare", vendorId: VENDOR_ID,
 });
 
+/** Where UserAccount keeps the connected Cloudflare user's id; see getCloudflareUserId. */
+const USER_ID_KEY = "cloudflareUserId";
+
 // A nonce stored in UserAccount KV to protect the OAuth flow. Only one is active at a time; `stage`
 // tracks where we are. For the OAuth stage we also stash the PKCE verifier alongside the nonce.
 type StoredNonce = {
@@ -406,6 +409,27 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put<StoredAccessToken>("accessToken", grant.accessToken);
     this.ctx.storage.kv.put<string[]>("grantedScopes", grant.grantedScopes);
     this.#access.invalidateAll();
+    // A reconnect can be as another Cloudflare user.
+    this.ctx.storage.kv.delete(USER_ID_KEY);
+  }
+
+  /**
+   * The id of the Cloudflare user these credentials belong to: what a Cloudflare API read names as
+   * the member whose view of an account it disclosed, and what CloudflareVerifier.cloudflareUserId
+   * answers for an observer. Learned from Cloudflare once per install of credentials. Throws when
+   * the connection has no usable credentials or Cloudflare does not say, which is indeterminate
+   * and never a guess; a lookup a reconnect overtakes is returned but not kept.
+   */
+  async getCloudflareUserId(): Promise<string> {
+    const known = this.ctx.storage.kv.get<string>(USER_ID_KEY);
+    if (known !== undefined) return known;
+    const generation = this.#grantGeneration;
+    const token = await this.getAccessToken();
+    const identity = token ? await fetchIdentity(token) : null;
+    if (!identity) throw new Error("Could not tell which Cloudflare user this connection belongs to.");
+    const userId = identity.id.toLowerCase();
+    if (generation === this.#grantGeneration) this.ctx.storage.kv.put<string>(USER_ID_KEY, userId);
+    return userId;
   }
 
   hasRefreshToken() {
@@ -592,7 +616,9 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       const binding = parseApiResourceUrl(url);
       return {
         class: this.ctx.exports.CloudflareApiGatekeeper({
-          props: { userObjectId: this.ctx.props.userObjectId, ...binding },
+          // reportsSubresources: every read of a binding minted from here on names what it
+          // disclosed; see CloudflareApiGatekeeper.addObserver.
+          props: { userObjectId: this.ctx.props.userObjectId, ...binding, reportsSubresources: true },
         }),
         resource: binding.zoneName !== undefined ? ZONE_API_RESOURCE : ACCOUNT_API_RESOURCE,
       };
@@ -683,6 +709,11 @@ export interface CloudflareVerifierApi extends GatekeeperUserVerifier {
    * determined.
    */
   checkTelemetryAccess(accountIds: string[]): Promise<boolean[]>;
+  /**
+   * The id of the Cloudflare user the observer's own connection belongs to, for the Cloudflare API
+   * resource. Throws when it cannot be told, which is indeterminate, not a denial.
+   */
+  cloudflareUserId(): Promise<string>;
 }
 
 /** Verifies an observer's access using that observer's own Cloudflare credentials. */
@@ -698,6 +729,11 @@ export class CloudflareVerifier extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async checkTelemetryAccess(accountIds: string[]): Promise<boolean[]> {
     const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     return this.ctx.exports.UserAccount.get(id).checkTelemetryAccess(accountIds);
+  }
+
+  async cloudflareUserId(): Promise<string> {
+    const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    return this.ctx.exports.UserAccount.get(id).getCloudflareUserId();
   }
 }
 

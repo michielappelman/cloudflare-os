@@ -110,6 +110,21 @@ export type ApiCallOutcome = {
   submissions: Array<{ id: number; description: ActionDescription }>;
 };
 
+/** Stands in for an observer's verifier, as the Cloudflare API resource asks it. */
+class TestUserVerifier extends RpcTarget {
+  readonly #user: string;
+
+  constructor(user: string) {
+    super();
+    this.#user = user;
+  }
+
+  async cloudflareUserId(): Promise<string> {
+    if (this.#user.startsWith("!")) throw new Error(this.#user.slice(1));
+    return this.#user;
+  }
+}
+
 export class TestHooks extends DurableObject<Env> {
   #apiGatekeeper(facetName: string, props: CloudflareApiGatekeeperProps) {
     const exports = this.ctx.exports as unknown as TestExports;
@@ -139,6 +154,42 @@ export class TestHooks extends DurableObject<Env> {
         observations: queue.observations, submissions: queue.submissions,
       };
     }
+  }
+
+  /**
+   * Runs `verifyObserverAccess` on an API binding for observers, keyed by ID, whose verifiers name a
+   * known Cloudflare user (or throw, for a value starting with "!"). Returns the allowed observer
+   * IDs or the thrown message.
+   */
+  async apiVerifyObservers(
+    facetName: string, props: CloudflareApiGatekeeperProps,
+    users: Record<string, string>, subresources: string[],
+  ): Promise<string[] | string> {
+    const observers = Object.entries(users).map(([id, user]) => ({
+      id, verifier: new RpcStub(new TestUserVerifier(user)) as unknown as Fetcher<GatekeeperUserVerifier>,
+    }));
+    try {
+      return (await this.#apiGatekeeper(facetName, props).verifyObserverAccess(observers, subresources))
+        .allowedObserverIds;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** Runs `addObserver` on an API binding, returning the thrown message, or null when admitted. */
+  async apiAddObserver(facetName: string, props: CloudflareApiGatekeeperProps): Promise<string | null> {
+    const verifier = new RpcStub(new TestUserVerifier("unused")) as unknown as Fetcher<GatekeeperUserVerifier>;
+    try {
+      await this.#apiGatekeeper(facetName, props).addObserver("observer-1", verifier);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** What an API binding exports as its history. */
+  async apiHistory(facetName: string, props: CloudflareApiGatekeeperProps): Promise<string[]> {
+    return this.#apiGatekeeper(facetName, props).getHistoricalSubresources();
   }
 
   /** Approves an action, returning the error message or null. */
