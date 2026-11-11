@@ -1,10 +1,8 @@
 import { useMemo } from 'react'
 import {
   AppWindow,
-  ChartLineUp,
-  FileText,
-  Lightning,
-  Presentation,
+  CalendarDots,
+  Scan,
   type Icon,
 } from '@phosphor-icons/react'
 
@@ -19,40 +17,25 @@ type TaskSuggestion = {
   icon: Icon
 }
 
-// Formats are advertised by example rather than by a row of "Start with Docs" buttons, so the
-// first move isn't "pick a file type". The formats themselves are in the composer's `+` menu.
+// Everyday household tasks rather than office ones: this deployment serves a family. Each leans on
+// a connection the deployment has (calendar, the home printer), and the prompt asks for whatever is
+// not connected yet.
 const SUGGESTIONS: TaskSuggestion[] = [
   {
-    id: 'one-on-one',
-    label: 'Write a 1:1 pre-read',
-    description: 'A doc with a snapshot, things to inspect, and one ask',
-    icon: FileText,
+    id: 'week-ahead',
+    label: 'See my week ahead',
+    description: 'Your calendar at a glance: clashes and things to prepare',
+    icon: CalendarDots,
     prompt:
-      'Create a document to prepare for my next 1:1 with a direct report: a current snapshot, a coaching frame, things to inspect, carryover items from last time, and one clear ask.',
+      'Look at my calendar for the coming seven days and give me an overview per day: what is on, anything that clashes or sits too close together, and what I need to prepare or bring. Ask me which calendar to use if it is not connected yet, and offer to send me the overview on Telegram.',
   },
   {
-    id: 'team-meeting',
-    label: 'Build a team meeting deck',
-    description: 'Slides with progress, risks, and what needs a decision',
-    icon: Presentation,
+    id: 'scan-letter',
+    label: 'Scan and explain a letter',
+    description: 'Scan it on the printer, get it in plain words, and file it',
+    icon: Scan,
     prompt:
-      'Create a slide deck for my next team meeting: where things stand, what shipped, risks and blockers, and the decisions I need from the room. Ask me what the team is working on first.',
-  },
-  {
-    id: 'insights',
-    label: 'Find insights in my data',
-    description: 'Turn a spreadsheet or CSV into trends and recommendations',
-    icon: ChartLineUp,
-    prompt:
-      'Turn a dataset I will share (a spreadsheet, CSV, or pasted table) into a narrative analysis: key trends, anomalies, the "so what", and concrete recommendations.',
-  },
-  {
-    id: 'workflow',
-    label: 'Automate a workflow',
-    description: 'Trigger an agent when a new email arrives',
-    icon: Lightning,
-    prompt:
-      'Create an agent workflow that runs automatically when a new email arrives: read the message, decide what to do, and take action or draft a reply. Ask me which inbox to watch and what it should handle.',
+      'I have a letter to deal with. Scan it on the home printer (tell me when to put it on the glass or in the feeder), read it, and tell me in plain words who it is from, what it says, and what I need to do and by when. Then offer to save the scan as a PDF and to put any deadline in my calendar.',
   },
   {
     id: 'app',
@@ -99,12 +82,13 @@ function SuggestionRow({
   )
 }
 
-// How many of the suggestions above to show at once. The list is longer than the page should be:
-// four rows is inspiration, seven is a menu to read. Which three appear is chosen per visit, so the
-// ones below the fold still get seen -- and so Home doesn't look like it only does one thing.
+// How many of the suggestions above to show at once. Four rows is inspiration, seven is a menu to
+// read. When the list is longer than this, which ones appear is chosen per visit, so the ones below
+// the fold still get seen; with exactly this many, only their order varies.
 const VISIBLE_SUGGESTIONS = 3
 
 function pickSuggestions(): TaskSuggestion[] {
+  if (SUGGESTIONS.length <= VISIBLE_SUGGESTIONS) return SUGGESTIONS
   let shuffled = [...SUGGESTIONS]
   for (let i = shuffled.length - 1; i > 0; i--) {
     let j = Math.floor(Math.random() * (i + 1))
