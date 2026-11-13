@@ -32,7 +32,6 @@ import {
 } from "../../../components/chat/composer-tokens";
 import CapsuleOverlay from "../../../CapsuleOverlay";
 import type { SelectableItem } from "../../../ResourcePicker";
-import type { DefaultConnection } from "../../default-connections/defaultConnections";
 import GatekeeperModal from "../../../GatekeeperModal";
 import { formatIconDataUrl } from "../../../components/format/formatIconImage";
 import ComposerFormatMenuItems from "../../../components/format/ComposerFormatMenuItems";
@@ -97,7 +96,6 @@ export const ChatComposer = ({
   minRows = 2,
   seedText,
   seedNonce,
-  defaultConnections,
   draftStorageKey,
   draftUpdateBanner,
   blockedReason,
@@ -146,8 +144,6 @@ export const ChatComposer = ({
    * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
   seedText?: string;
   seedNonce?: number;
-  /** Connections to attach as capsules when the composer opens (Home's new-chat composer). */
-  defaultConnections?: DefaultConnection[];
   /** Session-storage key used to recover this composer's draft prompt after a page refresh. */
   draftStorageKey?: string;
   /** Optional label for the attach menu item. */
@@ -261,7 +257,6 @@ export const ChatComposer = ({
     attachModalPrefill,
     closeAttachModal,
     createCapsule,
-    insertDefaultCapsules,
     dismissUrl,
     isCreatingResource,
     openAttachModal,
@@ -347,7 +342,6 @@ export const ChatComposer = ({
     return () => cancelAnimationFrame(frame);
   }, [autoFocus, draftPresentationRequest, minRows, newChat]);
 
-  const defaultsAppliedRef = useRef(false);
   // Seed the composer from an external suggestion (Home task cards). Re-runs whenever the nonce
   // changes so picking the same suggestion twice still works. Focus + move the cursor to the end.
   useEffect(() => {
@@ -355,10 +349,6 @@ export const ChatComposer = ({
     recordDraftEdit();
     const text = seedText ?? "";
     replaceComposerDocument({ text, capsules: [], formats: [], command: null });
-    // A seed replaces the whole draft, default capsules included; put them back.
-    if (defaultsAppliedRef.current && defaultConnections?.length) {
-      void insertDefaultCapsules(defaultConnections);
-    }
     requestAnimationFrame(() => {
       const ta = composerTextareaRef.current;
       if (!ta) return;
@@ -368,15 +358,6 @@ export const ChatComposer = ({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedNonce]);
-  // Insert the user's default connections once per composer, unless a restored draft already
-  // carries capsules (it was composed with them, or the user removed them on purpose).
-  useEffect(() => {
-    if (defaultsAppliedRef.current || !defaultConnections?.length) return;
-    defaultsAppliedRef.current = true;
-    if (getDocumentSnapshot().document.capsules.length > 0) return;
-    void insertDefaultCapsules(defaultConnections);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultConnections]);
   const capsulesRef = useRef(capsules);
   capsulesRef.current = capsules;
   // Reset overlay selection when the overlay appears or changes URL, preferring a connected account

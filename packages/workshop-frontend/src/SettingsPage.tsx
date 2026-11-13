@@ -12,7 +12,6 @@ import { NotificationSettings } from './features/notifications/NotificationSetti
 import { useDocumentTitle } from './useDocumentTitle'
 import { isImeComposing } from './keyboardEvent'
 import { NotificationsSetting } from './features/notifications/NotificationsSetting'
-import { DefaultConnectionsSetting } from './features/default-connections/DefaultConnectionsSetting'
 
 // Shared, on-language control classes (match the rest of the app: Workspaces/Blueprints headers,
 // the gatekeepers toolbar, the command palette). Kept here so the profile page reads as part of the
@@ -199,7 +198,7 @@ const CommitEmailRow = ({ initialCommitEmail }: { initialCommitEmail?: string })
 export default function SettingsPage() {
   useDocumentTitle('Profile')
 
-  const { authenticatedApi, currentUser } = useAuthenticatedApi()
+  const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -498,15 +497,6 @@ export default function SettingsPage() {
             <NotificationsSetting api={authenticatedApi} />
           </div>
         </section>
-
-        {currentUser && (
-          <section className="flex flex-col gap-3">
-            <SectionLabel>Default connections</SectionLabel>
-            <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-              <DefaultConnectionsSetting api={authenticatedApi} userId={currentUser.id} />
-            </div>
-          </section>
-        )}
 
         {/* Upstream browser push through the central notification service; renders nothing unless
             the deployment advertises its VAPID key. */}
