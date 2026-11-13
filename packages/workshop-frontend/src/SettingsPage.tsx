@@ -503,7 +503,7 @@ export default function SettingsPage() {
           <section className="flex flex-col gap-3">
             <SectionLabel>Default connections</SectionLabel>
             <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-              <DefaultConnectionsSetting userId={currentUser.id} />
+              <DefaultConnectionsSetting api={authenticatedApi} userId={currentUser.id} />
             </div>
           </section>
         )}

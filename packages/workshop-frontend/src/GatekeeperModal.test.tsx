@@ -19,7 +19,6 @@ const testState = vi.hoisted(() => ({
   toasts: [] as { title: string, variant: string }[],
   frameKeys: [] as number[],
   ensureResources: null as ((patterns: string[]) => Promise<boolean>) | null,
-  setSelectionReady: null as ((ready: boolean | null) => void) | null,
   configurator: null as {
     acceptedResourceUrlPatterns: readonly string[]
     initialResourceUrl?: string
@@ -86,7 +85,6 @@ vi.mock('./ResourceConfiguratorHost', async () => {
       onCollectResourceUrlChange?.(() => Promise.resolve(testState.collectedUrl))
       testState.readinessEvents.push(testState.ready)
       onSelectionReadyChange?.(testState.ready)
-      testState.setSelectionReady = onSelectionReadyChange ?? null
       return () => onCollectResourceUrlChange?.(null)
     }, [mounted, onCollectResourceUrlChange, onSelectionReadyChange])
     return mounted ? <div data-testid="resource-configurator" /> : null
@@ -178,7 +176,6 @@ afterEach(() => {
   testState.toasts = []
   testState.frameKeys = []
   testState.ensureResources = null
-  testState.setSelectionReady = null
   api.subscriber = null
   api.startResourceConfigurator.mockReset()
   api.ensureAccountResources.mockReset()
@@ -187,10 +184,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// The fork's GatekeeperModal also has a choose-only variant; these tests render the creating one.
-type CreatingModalProps = Exclude<ComponentProps<typeof GatekeeperModal>, { onChosen: unknown }>
-
-async function renderModal(props: Partial<CreatingModalProps> = {},
+async function renderModal(props: Partial<ComponentProps<typeof GatekeeperModal>> = {},
   apiOptions: Parameters<typeof authenticatedApi>[0] = {}) {
   testState.authenticatedApi = authenticatedApi(apiOptions)
   container = document.createElement('div')
@@ -229,38 +223,6 @@ describe('GatekeeperModal configurator readiness', () => {
     const addConnection = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button'))
       .find(button => button.textContent === 'Add connection')!
     expect(addConnection.disabled).toBe(true)
-  })
-})
-
-describe('GatekeeperModal choose-only mode', () => {
-  it('reports the chosen account and resource URL without creating a gatekeeper', async () => {
-    stubResizeObserver()
-    testState.authenticatedApi = authenticatedApi()
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    root = createRoot(container)
-    const onChosen = vi.fn<(choice: object) => void>()
-    await act(async () => root!.render(<GatekeeperModal
-      open
-      onClose={() => {}}
-      onChosen={onChosen}
-      initialVendorId="catalog"
-      initialResourceUrlPattern={RESOURCE.urlPattern}
-    />))
-    expect(document.body.querySelector('[aria-controls="connection-group-panel-platform:ai-model"]'))
-      .toBeNull()
-    await vi.waitFor(() => expect(testState.setSelectionReady).not.toBeNull())
-    await act(async () => testState.setSelectionReady!(true))
-    const addConnection = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent === 'Add connection')!
-    await act(async () => addConnection.click())
-
-    expect(onChosen).toHaveBeenCalledExactlyOnceWith({
-      accountId: 1,
-      vendorId: 'catalog',
-      resourceUrl: 'https://catalog.example.com/',
-      label: 'Service catalog (Catalog account 1)',
-    })
   })
 })
 
@@ -329,7 +291,7 @@ describe('GatekeeperModal grouped resource types', () => {
       stubResizeObserver()
       testState.ready = true
       testState.collectedUrl = 'https://catalog.example.com/services/s1'
-      const getOverseer = vi.fn<CreatingModalProps['getOverseer']>(
+      const getOverseer = vi.fn<ComponentProps<typeof GatekeeperModal>['getOverseer']>(
         () => { throw new Error('Reached workspace') })
       vi.spyOn(console, 'error').mockImplementation(() => {})
       await renderModal({

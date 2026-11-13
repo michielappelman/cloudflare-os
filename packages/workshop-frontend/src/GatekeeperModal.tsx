@@ -43,16 +43,9 @@ import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer
 import { openConnectWindow } from './connectHandoff'
 import { AuthPopupCancelledError } from './features/native-app/authPopup'
 
-/** A resource connection picked in choose-only mode: what `newGatekeeper()` would be called with. */
-export type ChosenResourceConnection = {
-  accountId: number
-  vendorId: string
-  resourceUrl: string
-  /** The connection type and account, for display, e.g. "Jottacloud Folder (me@example.com)". */
-  label: string
-}
-
-type GatekeeperModalCreation = {
+export interface GatekeeperModalProps {
+  open: boolean
+  onClose: () => void
   /**
    * Returns an overseer stub. Called only when actually creating a gatekeeper. This allows
    * the Home page to lazily provision a gadget on first use.
@@ -64,21 +57,6 @@ type GatekeeperModalCreation = {
    * callback and shows a loading state while it runs.
    */
   onCreated: (gk: RpcStub<GatekeeperClient<any>>, id: WorkpieceId) => Promise<void>
-  onChosen?: never
-} | {
-  /**
-   * Choose-only mode, for configuring connections outside any workspace (Settings): the modal
-   * offers only resource connections and reports the account and resource URL the user picked
-   * instead of creating a gatekeeper.
-   */
-  onChosen: (choice: ChosenResourceConnection) => void
-  getOverseer?: never
-  onCreated?: never
-}
-
-export type GatekeeperModalProps = GatekeeperModalCreation & {
-  open: boolean
-  onClose: () => void
   /**
    * Workpieces offered as env entries when creating an agent spawner (see AgentSpawnerConfig.env),
    * normally the gadget the spawner is being created for plus that gadget's own bindings. All are
@@ -247,9 +225,8 @@ function accountSupportsConnection(account: AccountOption, connection: Connectio
 }
 
 export default function GatekeeperModal({
-  open, onClose, spawnerEnvCandidates,
+  open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
   initialVendorId, initialResourceUrl, initialResourceUrlPattern, initialAccountId,
-  ...creation
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -316,9 +293,9 @@ export default function GatekeeperModal({
 
   const siteName = useSiteName()
   const allConnections = useMemo(() => [
-    ...(creation.onChosen ? [] : platformConnectionTypes(siteName)),
+    ...platformConnectionTypes(siteName),
     ...vendors.flatMap(connectionsForVendor),
-  ], [creation.onChosen, siteName, vendors])
+  ], [siteName, vendors])
 
   const selectedConnection = useMemo(
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
@@ -741,8 +718,7 @@ export default function GatekeeperModal({
   const handOff = async (created: RpcPromise<GatekeeperClient<any>>) => {
     const [gatekeeper, id] = await Promise.all([created, created.getId()])
     try {
-      if (creation.onChosen) throw new Error('Choose-only mode creates no connection.')
-      await creation.onCreated(gatekeeper, id)
+      await onCreated(gatekeeper, id)
     } catch (err) {
       gatekeeper[Symbol.dispose]()
       throw err
@@ -757,8 +733,7 @@ export default function GatekeeperModal({
     }
     setCreating(true)
     try {
-      if (creation.onChosen) return
-      const overseer = await creation.getOverseer()
+      const overseer = await getOverseer()
       await handOff(overseer.newAiModelGatekeeper(selectedModelId))
     } catch (err) {
       console.error('Failed to create AI model gatekeeper:', err)
@@ -785,8 +760,7 @@ export default function GatekeeperModal({
 
     setCreating(true)
     try {
-      if (creation.onChosen) return
-      const overseer = await creation.getOverseer()
+      const overseer = await getOverseer()
       await handOff(overseer.newAgentSpawnerGatekeeper(config))
     } catch (err) {
       console.error('Failed to create agent spawner gatekeeper:', err)
@@ -818,21 +792,7 @@ export default function GatekeeperModal({
       if (resource && !acceptedResourceUrlPatterns.includes(resource.urlPattern)) {
         throw new Error(`Grant access to ${resource.title} to connect it.`)
       }
-      if (creation.onChosen) {
-        const vendorId = selectedConnection.vendorId
-        if (!vendorId) throw new Error('Connection has no vendor.')
-        const account = matchingAccounts.find(a => a.id === selectedAccountId)?.description
-        const accountName = account?.uniqueName ?? account?.displayName
-        creation.onChosen({
-          accountId: selectedAccountId,
-          vendorId,
-          resourceUrl,
-          label: accountName ? `${selectedConnection.title} (${accountName})` : selectedConnection.title,
-        })
-        onClose()
-        return
-      }
-      const overseer = await creation.getOverseer()
+      const overseer = await getOverseer()
       // Typed nullable, but never null: the overseer throws instead.
       await handOff(overseer.newGatekeeper(selectedAccountId, resourceUrl) as RpcPromise<GatekeeperClient<any>>)
     } catch (err) {
