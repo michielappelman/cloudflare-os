@@ -19,11 +19,12 @@ own terms. See `plans/gitlab-gatekeeper.md` for the design record.
 
 `gitPull(oids, options)` returns a `GitPullTransfer`: a one-shot raw PACK stream and a separate
 terminal status. Lazy DO reads consume it through the bounded object cache. The same capability
-supports native Git hydration, but does not enable it here: the container consumer ships in a
-separate kernel worktree-replica bootstrap change. That consumer must bind the bootstrap to an
-authorized immutable commit, request its complete tree at depth one, and import the pack without
-populating the DO cache. `gitPull` is kernel-facing, not a gadget-facing arbitrary Git proxy;
-the kernel selects objects from recorded provenance, not a provider-side advertisement validator.
+also serves native Git in a container that mounted a worktree: the container clones through
+`WorktreeReplicator.gitPull()`, and the kernel asks this gatekeeper for the history and files it
+doesn't store, streaming them through without storing the files (see
+[`docs/worktree-replicas.md`](../../docs/worktree-replicas.md#git-transport)). `gitPull` is
+kernel-facing, not a gadget-facing arbitrary Git proxy; the kernel selects objects from recorded
+provenance, not a provider-side advertisement validator.
 No encoded Git commands, ref discovery, or arbitrary clone URLs cross this interface. OAuth and
 optional Cloudflare Access credentials remain in the gatekeeper's transport, including on
 self-hosted instances.
@@ -135,7 +136,7 @@ can still hold confidential issues and internal notes; job logs and test reports
   rewrite key and the legacy admission requirement.
 - **Every read reports it.** Each read, each page of a listing as it is returned, an empty result,
   and one served from a cache or from queued actions, reports `project/<projectId>` as its
-  subresource, so the Workshop checks everyone who can see it before it is returned (see
+  subresource, which the Workshop checks collaborators against (see
   [docs/observers.md](../../docs/observers.md) §10). A job log reports
   `project/<projectId>/role/developer`. A test report reports `project/<projectId>/role/developer`
   when it was read through a member below Maintainer who is not an administrator, and

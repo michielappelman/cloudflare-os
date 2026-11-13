@@ -23,7 +23,7 @@ Write new gatekeepers to this observer contract:
 - Implement `addObserver(id, verifier)` and `removeObserver(id)`, which the current interface requires, as **compatibility-only no-ops**. Do not introduce observer rosters, observed-set logs, stored observer verifiers, `excludeObservers`, or new legacy trackers.
 - Require `subresources` in your read helper's type; the shared type still makes it optional. Type-checking does not enforce the whole contract; use the [review checklist](#reviewing-a-gatekeeper).
 
-The current `gatekeeper.ts` JSDoc still describes the legacy protocol, in which `addObserver()` must verify and throw and a binding-wide requirement such as tenant membership belongs there. For new gatekeepers this section overrides it. The current kernel already supports that: it checks every reported requirement through `verifyObserverAccess()` before authorizing each read, and again at every collaborator's open.
+The current `gatekeeper.ts` JSDoc still describes the legacy protocol, in which `addObserver()` must verify and throw and a binding-wide requirement such as tenant membership belongs there. For new gatekeepers this section overrides it. The current kernel already supports that: it checks every reported requirement itself through `verifyObserverAccess()`.
 
 This is a **new-authoring** rule, not a shortcut for migrating existing gatekeepers. Existing migrations must preserve old checks and export their historical requirements through `getHistoricalSubresources()`; they cannot export a blind `[]` or turn their admission methods into no-ops. See [Existing-code migration and legacy history](#existing-code-migration-and-legacy-history).
 
@@ -182,6 +182,8 @@ When something already knows the exact resource — most importantly an AI agent
 
   The runtime seeds these values before first render and reflects them in `Autocomplete`/`TextInput`/`RadioCards`/`HierarchyPicker` inputs. Make sure your `resourceUrl(values)` and `initialValuesFromResourceUrl(url)` are inverses so a prefilled form round-trips to the same URL. **Every gatekeeper with selectable resources should support this** so agents can fully pre-configure a connection.
 
+  A creation configurator (`startCreationConfigurator`) is pre-filled from the configuration the agent suggested (`createExternalResource`'s `configuration`), paired with the pattern of the type being created. Set `creationConfigurationDescription` on the type to let the agent suggest one, naming what your configurator's `resourceUrl()` returns (Google: "the URL of the Google Drive folder to create it in"); without it the kernel refuses a suggestion. That URL is not one of the type's, so map it with `initialValuesFromResourceUrl`: the automatic mapping would read it as the resource being created. An agent picked it, so tell the approver while the choice is still the agent's.
+
 ### Step 7: STOP — Ask operator whether to proceed to phase 2
 
 The operator may prefer to implement phase 2 later, perhaps in a new context. Stop here and ask the operator whether to proceed.
@@ -217,6 +219,7 @@ Exceptions, kept `true` by decision although a rule covers them; add one only wi
 - Gmail's trash, spam, draft delete and label delete (rule 1): routine mailbox upkeep, and trash and spam are undone in Gmail.
 - GitHub's force push to a branch that is neither the default nor protected (rule 1): it has its own `forcePush` kind, which a user enables apart from other pushes.
 - X's bookmark, mute and hide (rule 3): one billed write each, and the only X writes its developer policy lets software automate (see `packages/gatekeeper-x/AGENTS.md`).
+- Google Drive's comments and replies that mention an address after `@` or `+` (rule 2): Google emails the mentioned person the text, even one who cannot open the file; the comment itself goes on the bound file, and the gatekeeper looks for no mention, so the one "Drive comments" kind covers them (see `packages/gatekeeper-google/README.md`).
 
 Every `false` carries a one-line comment naming its rule. Posting into the resource the user bound (its channel, thread or issue) is not rule 2. A package's `AGENTS.md` or README may be stricter (e.g. `gatekeeper-x`); follow it.
 
@@ -280,7 +283,7 @@ For concrete examples, see the Google gatekeeper's Google Docs simulation/cache 
 
 ### Observer verification
 
-This is responsibility 7. The gatekeeper reports what each disclosure depends on; the Workshop tracks those dependencies and asks which observers can access them. Before authorizing a read, it checks every collaborator who can see the chat or gadget that made it through `verifyObserverAccess()`. It records the reported IDs and checks them again when collaborators open that context.
+This is responsibility 7. The gatekeeper reports what each disclosure depends on; the Workshop tracks those dependencies and asks, through `verifyObserverAccess()`, which observers can access them. Which collaborators it asks about, and when, is the Workshop's policy (`docs/observers.md` §10), not part of the gatekeeper's contract: answer correctly for whichever observers a call names.
 
 For **new gatekeepers**, there is one authoring protocol: explicit `subresources` on every observation, with no binding-wide admission dependency. Omitting the optional field selects legacy behavior; it does not fail type-checking. Prevent that omission with a typed helper, not a legacy tracker.
 

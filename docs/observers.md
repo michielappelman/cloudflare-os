@@ -91,9 +91,7 @@ The check works as follows:
     connections with the spawner creator's authority), plus every connection through which any
     of those gadgets recorded requirements (§10). See `#gadgetReach`. Opening the workspace shell
     verifies nothing, since it shows nothing a gadget read. Failing to verify
-    for one gadget never affects another the collaborator holds. A collaborator who still holds
-    a legacy workspace-wide `use` grant (docs/sharing.md) holds every gadget, but is verified the
-    same way, for each gadget they get.
+    for one gadget never affects another the collaborator holds.
 - **Account selection.** A collaborator must have their own connected account for each vendor the
   Gadget depends on. For ordinary bindings, they choose which account to use (e.g. work or personal
   Google). If an account cannot be selected automatically, the configuration modal prompts them to
@@ -105,7 +103,9 @@ The check works as follows:
   *store* observed data and re-display it later (even to a `use` observer who opens much later),
   every exclusion/enforcement decision keys off whether a user is still *authorized* in the
   sharing graph (`computeEffectiveAccess`), and for a gadget, whether their access includes a
-  gadget that reaches it -- never off whether they currently have it open.
+  gadget that reaches it -- never off whether they currently have it open. The one exception is
+  §10's read-time check of reported subresources, which asks only collaborators holding a live
+  session; the others meet those requirements at their next admission.
 
 ---
 
@@ -890,7 +890,7 @@ its resource types.
 | **google** | Google Doc | **B**, kernel-checked (§10) | Every read reports the bound document as `docs/document/<documentId>`, one ID for every tab, since Google shares a document as a whole (a document whose creation is pending reports nothing). `verifyObserverAccess` allows an observer only if the Docs API opens the document for their own account, answered by their `UserAccount` under the same reuse rules as Calendar's availability checks below. Only the API refusing without giving a reason (403) or not holding the document for the account (404) counts as no access; any other refusal, such as a missing scope, a disabled API or rejected credentials, fails the check, as it does for `addObserver`. `addObserver` still checks the observer's access to the bound document, for reads made before they reported it. |
 | **google** | Google Spreadsheet | **B**, kernel-checked (§10) | As the Google Doc row, reporting `sheets/spreadsheet/<spreadsheetId>` and asking the Sheets API. Spreadsheet sharing applies to the whole file: protected ranges restrict edits and hidden sheets restrict nothing, so every worksheet shares the one ID. |
 | **google** | Google Slides Presentation | **B**, kernel-checked (§10) | As the Google Doc row, reporting `slides/presentation/<presentationId>` and asking the Slides API. Presentation sharing applies to the whole file, so every slide shares the one ID. |
-| **google** | Google Drive (account / folder / file) | **C**, kernel-checked (§10) | Every read reports the Drive units it depends on: `drive/file/<fileId>` for each file whose metadata it returns, `drive/content/<fileId>` for each file whose bytes or PDF text it returns, and `drive/folder/<folderId>` for each folder it lists or opens. A Doc, Sheet or Slides presentation read through Drive also reports its native ID as the rows above do, and on a folder binding the folder and the file it was found in. A folder is a Drive file with the same ID, but `drive/folder/` asks more: `verifyObserverAccess` allows an observer a file only if their account holds a Drive grant and Drive shows them the file, and a folder only if it is also live and they can list its children. `drive/content/` asks more of a file too: Drive must also let the observer download it (`capabilities.canDownload`), since an owner or administrator can stop viewers downloading a file they can still see; PDF text read before content units existed was reported as `drive/file/` and keeps that weaker check. Native IDs are checked as above, all under the same reuse rules. Account-relative answers such as an account binding's empty search, a folder the account cannot list, or a file it cannot see report `[]`; a folder binding's search reports its folder, and any child folders it names, even when empty. Invisible-file 403 and 404 probes on an account binding return the same generic unavailable-file error without Google's per-file reason, so neither leaves an unsatisfiable sharing requirement. Account-wide failures propagate unchanged. `addObserver` keeps the tracker, which reads no longer feed: it checks the Drive grant, the bound folder or file, and the units reads recorded before they reported them, asking Drive every time, and still refuses everyone on a binding an earlier release latched closed after an owner-relative read it recorded nothing else about. |
+| **google** | Google Drive (account / folder / file) | **C**, kernel-checked (§10) | Every read reports the Drive units it depends on: `drive/file/<fileId>` for each file whose metadata it returns, `drive/content/<fileId>` for each file whose bytes or PDF text it returns, and `drive/folder/<folderId>` for each folder it lists or opens. A file's comments are reported as the file: a comment listing reports the file (and, on a folder binding, the folder) on every page, an empty one included, with the document as well when a page shows a comment still awaiting approval that quotes it, so whoever can open the file sees its comments, a collaborator who can only view it included, to whom Google itself shows none. A comment write reports the same file before it is queued, with the document when it quotes one, and nothing of its own. A file's sharing is reported as the file as well: a sharing call (`listAccess()`, `share()`, `updateAccess()`, `unshare()`) reports the file (and, on a folder binding, the folder) and no other ID, so whoever can open the file sees who it is shared with, addresses and roles included, which Google itself withholds from an account that cannot share the file. A move reports the file and the folder it goes into, as files (and, on a folder binding, the positioned folder), but never the connected account's own My Drive root as the folder it goes into, nor, on an account binding, the folder it leaves, so that a file at the top level of My Drive, or moved to it, leaves no requirement nobody else can pass. A Doc, Sheet or Slides presentation read through Drive also reports its native ID as the rows above do, and on a folder binding the folder and the file it was found in. A folder is a Drive file with the same ID, but `drive/folder/` asks more: `verifyObserverAccess` allows an observer a file only if their account holds a Drive grant and Drive shows them the file, and a folder only if it is also live and they can list its children. `drive/content/` asks more of a file too: Drive must also let the observer download it (`capabilities.canDownload`), since an owner or administrator can stop viewers downloading a file they can still see; PDF text read before content units existed was reported as `drive/file/` and keeps that weaker check. Native IDs are checked as above, all under the same reuse rules. Account-relative answers such as an account binding's empty search, a folder the account cannot list, a file it cannot see, a file it cannot comment on, when a comment listing or a comment write is refused for that, a file it cannot share, the top level of its own My Drive named as a sharing target, or a move it is not allowed to make, report `[]`, a comment or sharing call refused for a file the account cannot comment on or share having already reported the file (and, on a folder binding, the folder) when it checked that the file is in scope; a folder binding's search reports its folder, and any child folders it names, even when empty. Invisible-file 403 and 404 probes on an account binding return the same generic unavailable-file error without Google's per-file reason, so neither leaves an unsatisfiable sharing requirement. Account-wide failures propagate unchanged. `addObserver` keeps the tracker, which reads no longer feed: it checks the Drive grant, the bound folder or file, and the units reads recorded before they reported them, asking Drive every time, and still refuses everyone on a binding an earlier release latched closed after an owner-relative read it recorded nothing else about. |
 | **google** | Google Calendar (selected calendar) | **B**, kernel-checked (§10) | Every read reports what it returned from Google: metadata and every event listing, an empty one included, report `calendar/calendar/<calendarId>`. `verifyObserverAccess` allows an observer for a calendar only with `writer` or `owner` access to that calendar, since `reader` access hides private-event details, reused as for availability (next row); a lookup Google refuses for any reason but the calendar's absence fails the check. `addObserver` still requires that access to the bound calendar, for event reads made before reads reported subresources. Future: let the binding owner exclude private events so readers can collaborate. |
 | **google** | Google Calendar (availability) | **C**, kernel-checked (§10) | An availability check reports each calendar whose free/busy it read successfully, the bound one included, as a `calendar/freeBusy/<calendarId>` subresource (a failed lookup reports nothing); only an `allVisible` binding may check calendars other than its own. `verifyObserverAccess` allows an observer only if their own account can query every one's free/busy. Only Google's answer for a calendar is a verdict: any error, including Google refusing the query itself, fails the check. The observer's `UserAccount` reuses an allowed answer for up to 15 minutes and a denial for up to 15 seconds, counted from when it asked Google and only until its credentials are next installed, so a share revoked in Google can still admit the observer for up to 15 minutes and a new share is noticed within 15 seconds. `addObserver` still checks the calendars recorded before reads reported them. |
 | **google** | Gmail Mailbox | **A**, kernel-checked (§10) | Every read, hook firings included, reports the mailbox owner's account as a `gmail/user/<sub>` subresource: the stable Google account ID (`sub`) the binding pins on first use, not an address, which can change. `verifyObserverAccess` allows an observer only if their own account is that same Google account, answered by their `UserAccount` under the same reuse rules as Calendar's availability checks above. `addObserver` still always throws, for reads made before they reported it. (Future: allow observers who independently have access, e.g. mailing-list members — explicitly out of scope now.) |
@@ -963,9 +963,10 @@ per-connection protocol, flag, or switch: each call to `authorizeObservation()` 
 - **Absent:** the Workshop checks nothing for that read and records no requirement; the
   gatekeeper's own `addObserver()` / `excludeObservers` must cover it, exactly as above.
 - **Present:** the read is attributed to its caller's context, every collaborator who can see
-  that context is checked through the connection's `verifyObserverAccess()`, and the IDs are
-  recorded as requirements on the audit record. A denial or failed check refuses the read and
-  records nothing.
+  that context and holds a live session is checked through the connection's
+  `verifyObserverAccess()`, and the IDs are recorded as requirements on the audit record; the
+  others are checked against them at their next admission. A denial or failed check refuses the
+  read and records nothing.
 - **`[]`:** an explicit "nothing restricts this read": no check, and no requirement recorded.
 - **`[GLOBAL_SUBRESOURCE_ID]` (`["global"]`):** the gatekeeper verifies that the observer's chosen
   account for the vendor can read everything disclosed on the one service instance the deployed
@@ -1018,15 +1019,19 @@ The gatekeeper's side of the contract (ID rules and limits, `verifyObserverAcces
   (`ObserverLedger.observerScope`), never an unrelated gadget's. Two gadgets
   reporting different subresources through one connection have those requirements checked
   independently, but must still pass the connection-wide `addObserver()` check above.
-  Each observation checks its IDs for every configured observer the data reaches, online or not:
+  Each observation checks its IDs for every configured observer the data reaches who holds a live
+  session (a client interface, a capability minted into one, or an admission in flight):
   for a gadget's read, "build" collaborators and those whose access includes a gadget that
   reaches it (`gadgetsReaching`); for a workspace read, anyone with access; for a chat's, "build"
-  collaborators. A collaborator who lost access is skipped. Either way the Workshop looks up each
-  observer's verifier for their chosen account (`getVerifier()` refuses a disconnected or
+  collaborators. A collaborator who lost access or holds no session is skipped: the read still
+  records its requirements, which their next admission checks, so an offline collaborator's
+  expired or lapsed account cannot block reads. What can reach a skipped collaborator before then
+  is listed under Known limitations. For each observer left in the audience, the Workshop looks
+  up their verifier for their chosen account (`getVerifier()` refuses a disconnected or
   wrong-vendor account even when there is nothing to check) and asks `verifyObserverAccess()`:
-  one call per 10 observers for a read's audience, and batches of 10,000 IDs for admission,
-  stopping at the first batch that denies. A denial, missing method, failed call, or malformed
-  answer fails closed for every observer in the call, with no permission cached between operations.
+  one call at a time, each for at most 10 observers and 10,000 IDs, stopping at the first call
+  that denies. A denial, missing method, failed call, or malformed answer fails closed for every
+  observer in the call, with no permission cached between operations.
 - **Races.** After verifying, admission recomputes what it must verify and runs the pass again
   (at most three times) if a connection in its scope appeared or disappeared, or its requirements
   changed: one recorded meanwhile, one a gadget it newly reaches had recorded, or one dropped
@@ -1036,9 +1041,9 @@ The gatekeeper's side of the contract (ID rules and limits, `verifyObserverAcces
   have grown, but asks `verifyObserverAccess()` only about requirements no earlier pass checked;
   after a configuration prompt it checks them all again. Requirements that keep landing faster
   than a pass completes can still exhaust the budget. An observation recomputes who it reaches
-  after its checks and checks whoever it gained (at most three times). Both decisions are
-  confirmed in the same synchronous block that publishes them (the observer record; the audit
-  record), so neither can miss the other.
+  after its checks and, if it gained anyone, checks that whole audience again (at most three
+  times). Both decisions are confirmed in the same synchronous block that publishes them (the
+  observer record; the audit record), so neither can miss the other.
 - **Pending creations.** While a `createExternalResource` creation is pending, its simulated
   reads are audited and enforce workspace policy but record no requirements, even if they report
   subresources.
@@ -1062,10 +1067,10 @@ The gatekeeper's side of the contract (ID rules and limits, `verifyObserverAcces
   That `gadgetId` is trusted even though an agent-bound hook's is inferred and its callback
   carries its own restore target: while the hook is enabled, its connection is in the scope of
   that gadget and every gadget reaching it, or of every gadget when the hook names none. Before
-  delivery, "build" collaborators must pass verification, and so must "use" collaborators with an
-  account chosen for the connection whose access includes a gadget reaching the hook's gadget
-  (anyone with access, for a workspace-attributed firing); later admission to such a gadget checks
-  the recorded subresources. Firings revalidate that the hook exists, is enabled, and its
+  delivery, verification covers only collaborators holding a live session: "build" collaborators,
+  and "use" collaborators with an account chosen for the connection whose access includes a gadget
+  reaching the hook's gadget (anyone with access, for a workspace-attributed firing). Later admission
+  to such a gadget checks the recorded subresources. Firings revalidate that the hook exists, is enabled, and its
   connection is usable on each call and synchronously before the observation's audit/policy
   commit, after asynchronous verification. A racing disable/delete prevents delivery. Disabling
   or deleting a hook stops future events and leaves delivered data's requirements in the action
@@ -1091,5 +1096,20 @@ next admission re-registers the remembered account, the connection's `excludeObs
 for a different account than the kernel's checks. Each check uses an account of the
 collaborator's that the connection accepted in `addObserver`, so the mismatch can deny reads the
 remembered account could see but admits none against an account the connection refused.
+
+A reported subresource is checked at read time only against collaborators holding a live session
+(§10), and only the overseer's own leases count as one. Data a read derives can therefore reach a
+collaborator it skipped before their next admission checks it:
+
+- **Escaped capabilities.** A capability a gadget method returns, or a client callback a gadget
+  retains with `dup()`, keeps working after the collaborator disposes every counted stub. Reads
+  made after that skip them, while the capability keeps carrying what those reads return. Closing
+  this needs membranes.
+- **Their own agent turn.** A fresh turn holds no lease for its initiator, so once they close the
+  workspace, its later reads skip them while it keeps acting on their prompt. A resumed turn does
+  hold one (see "Restarting when verification scope widens").
+- **Chat previews.** Unread fanout to an offline `build` collaborator gates on their existing
+  admission (`mayReadChatState`), not on requirements recorded since, so the latest message's
+  first line (at most 240 characters) can carry data their next admission would refuse.
 
 The remaining observer-side deferrals are ledgered in `plans/restricted-data-sharing.md`.

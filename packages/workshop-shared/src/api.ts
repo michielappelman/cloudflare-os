@@ -25,7 +25,7 @@
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AgentCatalog, AvatarImage, GatekeeperUiFrame, GatekeeperUserSelection, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
-import type { CodeChange } from "./code-change.js";
+import type { BytesRef, CodeChange } from "./code-change.js";
 import type { GitOid } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 
@@ -3163,18 +3163,18 @@ export type TreeNode =
 /**
  * One file's content at a commit, as returned by Overseer.readFilesAtCommit(). `text` carries
  * the file's UTF-8 content; `absent` means the path names no entry at that commit (or names a
- * directory); `unreadable` means the entry exists but cannot be presented as text -- a symlink,
- * a submodule, or binary content (never a matter of size) -- and carries a descriptive,
- * path-flavored message suitable for display in place of the file.
+ * directory); `unreadable` means the entry exists but is not a regular file -- a symlink or a
+ * submodule -- and carries a descriptive, path-flavored message suitable for display in place
+ * of the file.
  *
- * `stream` is how a regular file over MAX_BUFFERED_BLOB_SIZE arrives instead of `text`: its raw
- * bytes, `byteLength` of them, as a stream. The server has not checked that they are text, so
- * the caller applies the same rules it would have (no NUL byte, valid UTF-8). The caller must
- * consume or cancel every stream it receives.
+ * `blob` names a regular file by its git blob instead of carrying its content: the caller reads
+ * the bytes with Overseer.readBlob(). It is how content that is not text arrives (a NUL byte, or
+ * invalid UTF-8), and how every file over MAX_BUFFERED_BLOB_SIZE arrives. The server has not
+ * checked that a file over that size is text, so the caller applies the same rules to its bytes.
  */
 export type FileAtCommit =
   | { kind: "text"; text: string }
-  | { kind: "stream"; byteLength: number; content: ReadableStream<Uint8Array> }
+  | { kind: "blob"; blob: BytesRef }
   | { kind: "absent" }
   | { kind: "unreadable"; message: string };
 
@@ -3188,8 +3188,8 @@ export const MAX_READ_FILES_PER_CALL = 64;
  * Text bytes after which Overseer.readFilesAtCommit() stops decoding and omits the remaining
  * requested paths from its response (the client re-requests them). Keeps one response well
  * under the RPC message ceiling even with the UTF-16 inflation of serialized text. The first
- * file is always returned whole, however large, so every call makes progress. A `stream` entry's
- * bytes travel outside the response message, so they do not count toward this budget.
+ * file is always returned whole, however large, so every call makes progress. A `blob` entry
+ * carries no content, so it does not count toward this budget.
  */
 export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 
@@ -3214,6 +3214,12 @@ export type ActionLogEntry = {
    * source (e.g. webFetch tool).
    */
   gatekeeperId?: WorkpieceId;
+
+  /**
+   * The chat this entry was made from: the chat whose agent made it, or whose slash command or
+   * gadget code did. Absent for a hook firing and for gadget code running outside any chat.
+   */
+  chatId?: number;
 
   resourceTitle: string;
   resourceUrl?: string;
@@ -3469,8 +3475,9 @@ export interface Overseer extends RpcTarget {
    * the workspace's git store are pulled in one batch through the gatekeeper that provided the
    * commit; a pull failure fails the whole call, since it is transient or actionable rather than
    * a fact about any one file, whereas per-file conditions -- absent path, symlink, submodule,
-   * binary content -- are reported per entry (see FileAtCommit). A file of any size is read: one
-   * over MAX_BUFFERED_BLOB_SIZE (see `@gadgets/workshop-shared/gatekeeper`) as a `stream` entry.
+   * binary content -- are reported per entry (see FileAtCommit). No file is refused for its size:
+   * one over MAX_BUFFERED_BLOB_SIZE (see `@gadgets/workshop-shared/gatekeeper`) comes back as a
+   * `blob` entry, to read with readBlob().
    *
    * At most MAX_READ_FILES_PER_CALL paths per call. The server stops decoding once the
    * accumulated text exceeds READ_FILES_RESPONSE_BUDGET and omits the remaining paths from the
@@ -3859,6 +3866,13 @@ export interface Overseer extends RpcTarget {
       : Promise<GitOid>;
 
   /**
+   * Read a blob in this workspace's Git store, such as one a `blob` FileAtCommit or a chat's
+   * `setBytes` change names: the counterpart of uploadBlob(). Like readFilesAtCommit(), the read
+   * pulls a blob missing from the store through the gatekeeper that provided it.
+   */
+  readBlob(oid: GitOid): Promise<ReadableStream<Uint8Array>>;
+
+  /**
    * Fetch the bytes of a committed chat attachment over RPC. The canonical metadata is already
    * present in the message's ChatAttachmentRef. Images are inlined there, so this is normally used
    * only to download non-image attachments on demand.
@@ -4223,6 +4237,21 @@ export type AiChatMetadata = {
   spawnerName?: string;
 
   /**
+   * If this was started from an agent spawner, the spawner's id. `spawnerName` is the spawner's
+   * name when the chat started, so one spawner's runs can carry different names and two
+   * spawners' runs the same one; this tells them apart. Absent on chats spawned before it was
+   * recorded.
+   */
+  spawnerId?: WorkpieceId;
+
+  /**
+   * Present while the agent's turn is stopped on a decision only a user can make: an action it
+   * asked to wait for, a connection request, or a restricted web fetch, still pending. Derived
+   * server-side from the chat's log and delivered on metadata updates; never submitted by clients.
+   */
+  awaitingDecision?: true;
+
+  /**
    * Tokens the model reported for this conversation's last step, if known. Cleared when compaction
    * changes what the next prompt will contain, until a step measures it again.
    */
@@ -4304,9 +4333,9 @@ export type ChatCodeBase = {
    * but the content carries over -- `prior` describes the closed stream, and in-flight
    * submissions are transformed onto the new generation (see submitCodeChange()). **Destructive**
    * (a revert, draft discard, or agent turn abort erased already-applied changes, or
-   * updateChatFromMainline() re-rooted pins): content other clients may have transformed against
-   * is gone, so they must discard local state and rebuild. Pin additions do *not* bump -- they
-   * only append changes.
+   * updateChatFromMainline() or an agent step re-rooted pins): content other clients may have
+   * transformed against is gone, so they must discard local state and rebuild. Pin additions do
+   * *not* bump -- they only append changes.
    */
   generation: number;
 
@@ -4414,6 +4443,10 @@ export type ChatGadgetPinState = ChatGadgetPin & {
    * that was merged; accepting then fast-forwards the head from here through the merge commit
    * (see Overseer.mergeChanges()). A revert puts back what the earliest update it covers
    * records the pin had before (see AiChatMessageBody.mainlineMerge).
+   *
+   * A worktree's is always its accepted commit (WorktreeSummary.pinBase). An agent step can
+   * re-root a worktree's pin at a commit of its own, holding the result of a command it ran
+   * there, which then differs from this; accepting commits the chat's content on this commit.
    */
   mergedCommit: string;
 };
@@ -5411,6 +5444,13 @@ export type AiToolCall = {
     /** Title of the new resource, e.g. a document's title. */
     title: string;
 
+    /**
+     * A configuration to suggest, for a type that describes one (see
+     * `SupportedResource.creationConfigurationDescription`): the approver's configurator opens on
+     * it, and they may choose otherwise. Refused for any other type.
+     */
+    configuration?: string;
+
     /** Name under which the resource appears in the chat's env (see validateBindingName()). */
     bindingName: string;
   };
@@ -5987,7 +6027,8 @@ export type ApplyBlueprintResult = {
  * The WorkpieceSummary of a worktree: a checkout of an external git repository that an agent
  * works in (see AiChatMessageBody.createdWorktrees). It has no app and no bindings; the UI shows
  * only its code. Its three commits are the worktree's state as the chat sees it; the OT rows of
- * the chat's current epoch compose on `pinBase`.
+ * the chat's current epoch compose on the chat pin's `baseCommit`, which is `pinBase` unless an
+ * agent step re-rooted the pin (see ChatGadgetPinState.mergedCommit).
  */
 export type WorktreeSummary = {
   id: WorkpieceId;
@@ -6091,6 +6132,8 @@ export type GatekeeperCreationSpec = {
   vendorId: string;        // identifies the gatekeeper adapter (e.g. "google")
   resourceUrl?: string;    // absent until a resource created by createExternalResource exists
   typeUrlPattern: string;  // URL pattern from the vendor's SupportedResource (not the specific URL)
+  /** The configuration createExternalResource suggested (see its `configuration`). */
+  configuration?: string;
 } | {
   type: "aiModel";
   modelId: string;         // the user's configured model ID
@@ -6593,21 +6636,18 @@ export type CollaboratorRole = "build" | "use";
 
 /**
  * Access a new grant confers: "workspace" ("build" on the whole workspace), or "use" of one
- * gadget's deployed UI. ("use" of every gadget at once can no longer be granted, though
- * collaborators who received it before gadgets were shared individually keep it; see
- * CollaboratorAccess.)
+ * gadget's deployed UI.
  */
 export type CollaboratorGrant = "workspace" | {gadgetId: WorkpieceId};
 
 /**
  * A collaborator's effective access: the union of their valid grants reachable from the owner.
  * A grant counts only while its sharer (or share link creator) holds "build"; the owner is the
- * implicit root with "build". `gadgetIds` lists the gadgets a "use" collaborator may open, or is
- * "all" for a collaborator granted every gadget before gadgets were shared individually.
+ * implicit root with "build". `gadgetIds` lists the gadgets a "use" collaborator may open.
  */
 export type CollaboratorAccess =
   | {role: "build"}
-  | {role: "use", gadgetIds: WorkpieceId[] | "all"};
+  | {role: "use", gadgetIds: WorkpieceId[]};
 
 /** One person currently connected to a gadget. */
 export type PresenceParticipant = {
@@ -6638,9 +6678,8 @@ export type PermissionEdge = {
   role?: CollaboratorRole;
 
   /**
-   * The one gadget a "use" edge grants (for a share key edge, a copy of its link's). A "use" edge
-   * without one grants every gadget in the workspace; those are no longer created except to keep
-   * access someone already had (see removeCollaborator()'s `keepUsers`).
+   * The one gadget a "use" edge grants. Every "use" edge names one, including each of the edges
+   * a share link to several gadgets gives its recipient, one per gadget.
    */
   gadgetId?: WorkpieceId;
 } & ({
@@ -6654,7 +6693,7 @@ export type PermissionEdge = {
 
   /**
    * The id of the share link that was redeemed (the hash of its first key). Every key of the link
-   * resolves to this id, so redeeming any of them yields this one edge.
+   * resolves to this id, so redeeming any of them yields the same edges.
    */
   keyId: string;
 });
@@ -6700,10 +6739,14 @@ export type ShareLinkInfo = {
    */
   role?: CollaboratorRole;
 
-  /**
-   * The one gadget a "use" link grants. A "use" link without one grants every gadget, as links
-   * did before gadgets were shared individually; such a link can no longer be created, but it
-   * can still be copied and redeemed.
-   */
+  /** The one gadget a "use" link grants, unless it grants several (see `gadgets`). */
   gadgetId?: WorkpieceId;
+
+  /**
+   * The gadgets a "use" link to several gadgets grants, those of them that can still be shared,
+   * with their titles. Such a link is what became of a link to every gadget, made before gadgets
+   * were shared individually: it was frozen to the gadgets its workspace then held. No new one can
+   * be created, but it can still be copied and redeemed.
+   */
+  gadgets?: {id: WorkpieceId; title: string}[];
 };
