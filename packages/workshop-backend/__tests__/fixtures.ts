@@ -116,6 +116,7 @@ export async function openFakeOverseer(
         deleting: { get: () => false },
         containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
+        icon: { get: () => undefined },
       }),
       ...opts.impl,
     },
