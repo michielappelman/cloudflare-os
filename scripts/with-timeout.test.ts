@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { isAlive } from "./kill-process-tree.ts";
 
 const WITH_TIMEOUT = join(dirname(fileURLToPath(import.meta.url)), "with-timeout.ts");
 
@@ -14,16 +15,6 @@ const THRESHOLDS = ["--idle", "300", "--max", "600"];
 // Well above the expected sub-second waits, and above the watchdog's 5s grace.
 const STARTUP_TIMEOUT_MS = 20_000;
 const GONE_TIMEOUT_MS = 15_000;
-
-function isAlive(pid: number): boolean {
-  try {
-    // Signal 0 checks for existence without delivering anything.
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
 
 async function waitUntilGone(pid: number, timeoutMs = GONE_TIMEOUT_MS): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;

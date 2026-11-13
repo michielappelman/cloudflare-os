@@ -1,17 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { describe, it } from "node:test";
-import { killProcessTree, killProcessTreeEscalating } from "./kill-process-tree.ts";
-
-function isAlive(pid: number): boolean {
-  try {
-    // Signal 0 checks for existence without delivering anything.
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
+import { isAlive, killProcessTree, killProcessTreeEscalating } from "./kill-process-tree.ts";
 
 async function waitUntilGone(pid: number, timeoutMs = 10_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
