@@ -13,7 +13,6 @@
 // signalled.
 
 import { execFile, spawn } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
 
 // The pids a child-lister prints for one parent. Resolves empty when the parent has no children or
 // the lister reports failure -- `pgrep` exits 1 for "no matches", which is not an error here.
@@ -40,45 +39,15 @@ function childListerFor(pid: number): [string, string[]] {
     : ["ps", ["-o", "pid=", "--ppid", String(pid)]];
 }
 
-// Linux: one pass over /proc maps every live pid to its parent. Read directly rather than through
-// `ps`, which a minimal image (Workers Builds, from Nov 2026) may not ship: a missing lister reads
-// as "no children", so only the top of the tree was signalled and the rest outlived it.
-async function linuxParents(): Promise<Map<number, number[]> | undefined> {
-  let entries: string[];
-  try {
-    entries = await readdir("/proc");
-  } catch {
-    return undefined;
-  }
-  const children = new Map<number, number[]>();
-  await Promise.all(entries.filter(entry => /^\d+$/.test(entry)).map(async entry => {
-    let stat: string;
-    try {
-      stat = await readFile(`/proc/${entry}/stat`, "utf8");
-    } catch {
-      return; // Exited since the readdir.
-    }
-    // `pid (comm) state ppid ...`: comm may hold spaces and parentheses, so parse after the last ")".
-    const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
-    if (!Number.isInteger(ppid)) return;
-    const siblings = children.get(ppid);
-    if (siblings) siblings.push(Number(entry));
-    else children.set(ppid, [Number(entry)]);
-  }));
-  return children;
-}
-
 /**
  * Every pid in `pid`'s tree, `pid` included, collected breadth-first.
  */
 export async function collectTree(pid: number): Promise<number[]> {
   const collected = new Set<number>([pid]);
   let frontier = [pid];
-  const procChildren = process.platform === "linux" ? await linuxParents() : undefined;
   while (frontier.length > 0) {
-    const listed = procChildren
-      ? frontier.map(parent => procChildren.get(parent) ?? [])
-      : await Promise.all(frontier.map(parent => listChildren(...childListerFor(parent))));
+    const listed = await Promise.all(
+      frontier.map(parent => listChildren(...childListerFor(parent))));
     frontier = listed.flat().filter(child => !collected.has(child));
     for (const child of frontier) collected.add(child);
   }
