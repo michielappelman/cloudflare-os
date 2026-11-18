@@ -9,9 +9,10 @@
 
 import { collection, createTypedStorage } from "@gadgets/typed-storage";
 import {
-  DEFAULT_ADMIN_AUDIT_RETENTION_DAYS, DEFAULT_BANNER_COLOR,
+  DEFAULT_ADMIN_AUDIT_RETENTION_DAYS, DEFAULT_ADMIN_WORKSPACE_ACCESS, DEFAULT_BANNER_COLOR,
   DEFAULT_UPDATE_CHECK_INTERVAL_MINUTES, DEFAULT_UPDATE_MINIMUM_AGE_HOURS,
   DEFAULT_UPDATE_NOTICE_SNOOZE_HOURS,
+  type AdminWorkspaceAccess,
   type AiModelProvider, type AmbientGatekeeperMode, type BannerConfig, type BlueprintOutput,
   type BlueprintPublicInfo, type GatewayModel, type GatewayModelMode, type GatewayModelSettings,
   type ReasoningLevel,
@@ -45,8 +46,10 @@ export type AdminConfig = {
   banner: BannerConfig;
   /** Accent (brand) color hex, or "" for the default theme. */
   accentColor: string;
-  /** Disabled gatekeeper resources: vendorId -> disabled resource urlPatterns. */
+  /** Legacy pattern restrictions. Unknown patterns keep the vendor blocked until explicitly cleared. */
   disabledResources: Record<string, string[]>;
+  /** Disabled stable resource type IDs, keyed by vendor. */
+  disabledResourceTypeIds?: Record<string, string[]>;
   /** Fully-disabled gatekeeper vendor ids. */
   disabledGatekeepers: string[];
   /**
@@ -145,6 +148,11 @@ export type AdminConfig = {
   updateMinimumAgeHours: number;
   /** How many hours a dismissed update notice stays hidden in the browser that dismissed it. */
   updateNoticeSnoozeHours: number;
+  /** How much of a workspace or of a user's account admins chose to let inspectWorkspace() and
+   * inspectUser() show. ADMIN_WORKSPACE_ACCESS_MAX holds it in wherever it is enforced
+   * (adminAccessPolicy() in admin-access.ts), so a compromised admin session can never raise
+   * access past what the deployment allows. */
+  adminWorkspaceAccess: AdminWorkspaceAccess;
   /** How many days admins chose to keep admin audit records. Held at or above
    * ADMIN_AUDIT_RETENTION_MIN_DAYS wherever it is enforced. */
   adminAuditRetentionDays: number;
@@ -183,6 +191,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
   accentColor: "",
   disabledResources: {},
+  disabledResourceTypeIds: {},
   disabledGatekeepers: [],
   ambientGatekeeperModes: {},
   restrictedWebFetchHosts: [],
@@ -202,6 +211,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   updateCheckIntervalMinutes: DEFAULT_UPDATE_CHECK_INTERVAL_MINUTES,
   updateMinimumAgeHours: DEFAULT_UPDATE_MINIMUM_AGE_HOURS,
   updateNoticeSnoozeHours: DEFAULT_UPDATE_NOTICE_SNOOZE_HOURS,
+  adminWorkspaceAccess: DEFAULT_ADMIN_WORKSPACE_ACCESS,
   adminAuditRetentionDays: DEFAULT_ADMIN_AUDIT_RETENTION_DAYS,
 };
 

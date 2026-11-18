@@ -425,17 +425,17 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return retryOnDoReset(() => this.#user.listGatekeeperVendors(filter));
   }
 
-  connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<ConnectFlowStart> {
-    return this.#user.connectAccount(vendorId, resourceUrlPatterns);
+  connectAccount(vendorId: string, resourceTypeIds?: string[]): Promise<ConnectFlowStart> {
+    return this.#user.connectAccount(vendorId, resourceTypeIds);
   }
 
   completeConnectHandoff(ticket: string, nonce: string): Promise<void> {
     return this.#user.completeConnectHandoff(ticket, nonce);
   }
 
-  ensureAccountResources(accountId: number, resourceUrlPatterns: string[])
+  ensureAccountResources(accountId: number, resourceTypeIds: string[])
       : Promise<ConnectFlowStart | null> {
-    return this.#user.ensureAccountResources(accountId, resourceUrlPatterns);
+    return this.#user.ensureAccountResources(accountId, resourceTypeIds);
   }
 
   listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]> {
@@ -462,12 +462,17 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   startResourceConfigurator(
       accountId: number,
-      resourceUrlPattern: string) {
-    return this.#user.startResourceConfigurator(accountId, resourceUrlPattern);
+      resourceTypeId: string) {
+    return this.#user.startResourceConfigurator(accountId, resourceTypeId);
   }
 
-  startCreationConfigurator(accountId: number, resourceUrlPattern: string) {
-    return this.#user.startCreationConfigurator(accountId, resourceUrlPattern);
+  startCreationConfigurator(accountId: number, resourceTypeId: string, purpose?: "create" | "save") {
+    return this.#user.startCreationConfigurator(accountId, resourceTypeId, purpose);
+  }
+
+  saveFile(accountId: number, resourceTypeId: string, destination: string, name: string,
+      contentType: string, file: ReadableStream<Uint8Array>) {
+    return this.#user.saveFile(accountId, resourceTypeId, destination, name, contentType, file);
   }
 
   async dismissSharedWorkspace(workspaceId: string): Promise<void> {

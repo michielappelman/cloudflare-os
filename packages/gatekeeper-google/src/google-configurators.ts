@@ -10,7 +10,8 @@ import { GoogleAccessToken } from "./google-api";
 import { AccessTokenProvider, AccessTokenRequest } from "./auth-retry";
 import {
   DriveApi, DriveApiDisabledError, FOLDER_MIME_TYPE, SHORTCUT_MIME_TYPE, isFileInvisible,
-  isListableFolderFile, isListableFolderNode, type DriveFile, type DriveFileList, type DriveScopeNode,
+  isListableFolderFile, isListableFolderNode, MY_DRIVE_ROOT, type DriveFile, type DriveFileList,
+  type DriveScopeNode,
 } from "./drive-api";
 import type {
   BigQueryConfiguratorRpc, BigQueryNode, BigQueryNodeKind, BigQueryNodePage,
@@ -30,10 +31,10 @@ import type { ChatThreadConfiguratorRpc } from "./configurator/chat-thread-confi
 import type {
   DriveConfiguratorRpc, DriveNode, DriveNodeAncestor, DriveNodePage, DriveWriteAccess,
 } from "./configurator/drive-configurator-types";
-import type { CreationLocationConfiguratorRpc } from "./configurator/creation-location-configurator-types";
+import type { CreationLocationConfiguratorRpc, CreationPurpose } from "./configurator/creation-location-configurator-types";
 import {
   BIGQUERY_HOST, CREATED_FILES_GRANT, DRIVE_WRITES_GRANT, OFFICE_IMPORT_GRANT, parseResourceUrl,
-  SHARED_DRIVES_GRANT,
+  SHARED_DRIVES_GRANT, type ResourceTarget,
 } from "./resources";
 
 /**
@@ -46,6 +47,8 @@ const googleTokenGetters = new WeakMap<object, ConfiguratorTokenGetter>();
 const grantChecks = new WeakMap<object, (grant: string) => Promise<boolean>>();
 /** Whether the deployment a Drive picker was opened on offers read and write Drive connections. */
 const writeOffers = new WeakMap<object, boolean>();
+/** What a creation location picker was opened for (see GatekeeperUser.startCreationConfigurator()). */
+const creationPurposes = new WeakMap<object, CreationPurpose>();
 const calendarConfiguratorCaches = new WeakMap<object, Promise<ConfiguratorOption[]>>();
 const bigQueryConfiguratorCaches = new WeakMap<object, Map<string, Promise<unknown>>>();
 const BIGQUERY_CONFIGURATOR_CACHE_MAX_ENTRIES = 200;
@@ -593,21 +596,27 @@ async function drivePath(drive: DriveApi, file: DriveFile): Promise<DriveNodeAnc
 }
 
 /**
- * The picker's id for the folder or file a pasted Drive, Docs, Sheets or Slides link names, read as
- * a resource URL is once the index a browser signed in to several accounts adds (`/u/1/`) is
- * dropped. Undefined for anything else, which is searched for by name.
+ * What a pasted Drive, Docs, Sheets or Slides link names, read as a resource URL is once the index
+ * a browser signed in to several accounts adds (`/u/1/`) is dropped, or undefined for anything else.
  */
-function linkedDriveNodeId(text: string): string | undefined {
+function linkedDriveTarget(text: string): ResourceTarget | undefined {
   let url = URL.parse(text.trim());
   if (!url) return undefined;
   url.pathname = url.pathname.replace(/\/u\/\d+\//, "/");
-  let target;
   try {
-    target = parseResourceUrl(url.href);
+    return parseResourceUrl(url.href);
   } catch {
     return undefined;
   }
-  switch (target.kind) {
+}
+
+/**
+ * The picker's id for the folder or file a pasted link names (see {@link linkedDriveTarget}).
+ * Undefined for anything else, which is searched for by name.
+ */
+function linkedDriveNodeId(text: string): string | undefined {
+  let target = linkedDriveTarget(text);
+  switch (target?.kind) {
     case "driveFolder": return `folder:${target.folderId}`;
     case "driveFile": return `file:${target.fileId}`;
     case "doc": return `doc:${target.documentId}`;
@@ -749,19 +758,43 @@ function underMyDriveTab(node: DriveNode): DriveNode {
   return top && top.id !== SHARED_DRIVES.id ? { ...node, path: [{ ...top, id: MY_DRIVE_TAB }, ...below] } : node;
 }
 
-/** The picker of the folder a new Doc, Sheet, Presentation or folder is created in. */
+/** The picker of the folder a new Doc, Sheet, Presentation or folder is created in, or a file is saved to. */
 @validateRpc()
 export class CreationLocationConfiguratorUI extends RpcTarget implements CreationLocationConfiguratorRpc {
-  /** As for {@link DriveConfiguratorUI}. */
-  constructor(getToken: () => Promise<GoogleAccessToken>, holds: (grant: string) => Promise<boolean>) {
+  /** As for {@link DriveConfiguratorUI}, and what the folder is picked for. */
+  constructor(
+    getToken: () => Promise<GoogleAccessToken>, holds: (grant: string) => Promise<boolean>,
+    purpose: CreationPurpose,
+  ) {
     super();
     googleTokenGetters.set(this, getToken);
     grantChecks.set(this, holds);
+    creationPurposes.set(this, purpose);
+  }
+
+  async purpose(): Promise<CreationPurpose> {
+    return creationPurposes.get(this)!;
   }
 
   async listFolders(parentId: string, query: string, cursor: string | null): Promise<DriveNodePage> {
     let page = await listDriveNodes(this, parentId, query, cursor, true);
     return { ...page, nodes: page.nodes.map(underMyDriveTab) };
+  }
+
+  async getFolder(id: string): Promise<DriveNode | null> {
+    let node = await driveNode(this, id);
+    return node?.kind === "folder" ? underMyDriveTab(node) : null;
+  }
+
+  async folderForUrl(url: string): Promise<string | null> {
+    let target = linkedDriveTarget(url);
+    if (target?.kind === "driveAccount") return MY_DRIVE_TAB;
+    if (target?.kind !== "driveFolder") return null;
+    // Drive's `root` alias, which resourceUrl() mints for My Drive, and getFolder() knows only by
+    // its real ID.
+    if (target.folderId === MY_DRIVE_ROOT) return MY_DRIVE_TAB;
+    let folder = await this.getFolder(`folder:${target.folderId}`);
+    return folder?.addable ? folder.id : null;
   }
 
   async hasCreationAccess(): Promise<boolean> {

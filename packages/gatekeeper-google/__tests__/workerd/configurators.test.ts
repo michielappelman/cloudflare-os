@@ -14,9 +14,9 @@ import {
 import type { GoogleAccessToken } from "../../src/google-api";
 import { FOLDER_MIME_TYPE as FOLDER, SHORTCUT_MIME_TYPE as SHORTCUT } from "../../src/drive-api";
 import {
-  DRIVE_WRITES_GRANT, GOOGLE_DOC_RESOURCE, GOOGLE_DRIVE_FILE_RESOURCE, GOOGLE_DRIVE_FOLDER_RESOURCE,
+  CREATED_FILES_GRANT, DRIVE_WRITES_GRANT, GOOGLE_DOC_RESOURCE, GOOGLE_DRIVE_FILE_RESOURCE, GOOGLE_DRIVE_FOLDER_RESOURCE,
   GOOGLE_DRIVE_RESOURCE, GOOGLE_SHEETS_RESOURCE, GOOGLE_SLIDES_RESOURCE,
-  OFFICE_IMPORT_GRANT,
+  OFFICE_IMPORT_GRANT, SUPPORTED_RESOURCES,
   SHARED_DRIVES_GRANT, resourceUrlPatternsToOAuthScopes,
 } from "../../src/resources";
 
@@ -153,7 +153,7 @@ describe("Google resource configurators", () => {
           ],
         },
       });
-      const creating = new CreationLocationConfiguratorUI(async () => token("access-token"), async () => true);
+      const creating = new CreationLocationConfiguratorUI(async () => token("access-token"), async () => true, "create");
 
       await expect(creating.listFolders("folder:root", "", null)).resolves.toEqual({
         nodes: [
@@ -164,9 +164,9 @@ describe("Google resource configurators", () => {
       expect(calls[0].searchParams.get("q")).toBe(`trashed = false and mimeType = '${FOLDER}' and 'root' in parents`);
     });
 
-    // The creation picker's My Drive tab is Drive's `root` alias, so a pasted folder's path must
-    // start there, or at the Shared drives tab, for the picker to open it where it lives.
-    it("places a pasted folder link for a creation under its tab", async () => {
+    // The creation picker's My Drive tab is Drive's `root` alias, so a folder's path, pasted or
+    // looked up, must start there or at the Shared drives tab for the picker to open it in place.
+    it("finds a creation's folder with its path under its tab", async () => {
       const folder = (id: string, name: string, parents?: string[], driveId?: string) => ({
         id, name, mimeType: FOLDER, trashed: false, ...parents && { parents }, ...driveId && { driveId },
         capabilities: { canListChildren: true, canAddChildren: true },
@@ -177,8 +177,10 @@ describe("Google resource configurators", () => {
         "/files/plans": folder("plans", "Plans", ["0AMyRoot"]),
         "/files/specs": folder("specs", "Specs", ["0ADrive"], "0ADrive"),
         "/files/0ADrive": folder("0ADrive", "Engineering", undefined, "0ADrive"),
+        "/files/notes": { id: "notes", name: "Notes", mimeType: GOOGLE_DOC_MIME_TYPE, trashed: false },
+        "/files/archive": { ...folder("archive", "Archive", ["0AMyRoot"]), capabilities: { canListChildren: true, canAddChildren: false } },
       });
-      const creating = new CreationLocationConfiguratorUI(async () => token("access-token"), async () => true);
+      const creating = new CreationLocationConfiguratorUI(async () => token("access-token"), async () => true, "create");
       const pasted = async (id: string) =>
         (await creating.listFolders("folder:root", `https://drive.google.com/drive/folders/${id}`, null)).nodes;
 
@@ -191,6 +193,26 @@ describe("Google resource configurators", () => {
       await expect(pasted("specs")).resolves.toMatchObject([{
         id: "folder:specs", path: [{ id: "shared-drives" }, { id: "folder:0ADrive", title: "Engineering" }],
       }]);
+      // A looked-up folder is the node a pasted link to it lists.
+      for (let id of ["plans", "0AMyRoot", "specs"]) {
+        await expect(creating.getFolder(`folder:${id}`), id).resolves.toEqual((await pasted(id))[0]);
+      }
+      await expect(creating.getFolder("folder:notes")).resolves.toBeNull();
+      await expect(creating.getFolder("folder:gone")).resolves.toBeNull();
+
+      // A suggested place to create something is a link, as a browser shows it or the picker mints
+      // it, to a folder this account can add files to.
+      for (let [url, id] of [
+        ["https://drive.google.com/drive/u/1/folders/plans", "folder:plans"],
+        ["https://drive.google.com/drive/folders/0AMyRoot", "folder:root"],
+        ["https://drive.google.com/drive/folders/root", "folder:root"],
+        ["https://drive.google.com/drive/my-drive", "folder:root"],
+        ["https://drive.google.com/drive/folders/archive", null],
+        ["https://drive.google.com/drive/folders/notes", null],
+        ["https://drive.google.com/drive/folders/%E0%A4%A", null],
+        ["https://docs.google.com/document/d/notes/edit", null],
+        ["not a url", null],
+      ] as const) await expect(creating.folderForUrl(url), url).resolves.toBe(id);
     });
 
     // A shortcut outlives its target being deleted, unshared or trashed, and a listing says nothing
@@ -816,8 +838,11 @@ describe.each(OFFICE_KIND_CASES)("the $title type's Office files", testCase => {
   it("are chosen in the Drive picker, which the type shares a card with", async () => {
     let { frame, user } = await startOfficeConfigurator(testCase);
     let drive = await user.startResourceConfigurator(GOOGLE_DRIVE_RESOURCE.urlPattern);
+    let resource = SUPPORTED_RESOURCES.find(resource => resource.urlPattern === testCase.pattern)!;
+    let byId = await user.startResourceConfigurator(resource.id!);
 
     expect(frame.iframeHtml).toBe(drive.iframeHtml);
+    expect(byId.iframeHtml).toBe(drive.iframeHtml);
   });
 
   it("tells native, Office and unsupported files apart, with whether the owner allows copying", async () => {
@@ -1033,6 +1058,47 @@ async function storedAccount(
   };
   return { account, user: new GatekeeperUserImpl(ctx as never, {} as never) };
 }
+
+it.each(SUPPORTED_RESOURCES.filter(resource => resource.creatable))(
+  "opens $title's creation configurator by stable ID or legacy pattern", async resource => {
+    let { user } = await storedAccount([]);
+    let byPattern = await user.startCreationConfigurator(resource.urlPattern);
+    try {
+      let byId = await user.startCreationConfigurator(resource.id!, "save");
+      try {
+        expect(byId.iframeHtml).toBe(byPattern.iframeHtml);
+        let purposes = [byPattern, byId].map(frame => (frame.ui as unknown as CreationLocationConfiguratorUI).purpose());
+        await expect(Promise.all(purposes)).resolves.toEqual(["create", "save"]);
+      } finally { byId.ui[Symbol.dispose](); }
+    } finally { byPattern.ui[Symbol.dispose](); }
+  },
+);
+
+it("saves a file to a stored account's Drive with the created-files grant alone", async () => {
+  const DOCX = GOOGLE_DOC_RESOURCE.savableFrom![0];
+  let file = () => new Blob(["PK"]).stream();
+  let uploads: Request[] = [];
+  let session = "https://www.googleapis.com/upload/drive/v3/files?upload_id=session-1";
+  vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+    if (new URL(input).pathname === "/drive/v3/about") return Response.json({});
+    uploads.push(new Request(input, init));
+    return input === session
+      ? Response.json({ id: "new-1", mimeType: GOOGLE_DOC_MIME_TYPE })
+      : new Response(null, { headers: { Location: session } });
+  }));
+  let folder = "https://drive.google.com/drive/folders/root";
+
+  let { user } = await storedAccount([CREATED_FILES_GRANT]);
+  await expect(user.saveFile(GOOGLE_DOC_RESOURCE.id!, folder, "Plan", DOCX, file()))
+    .resolves.toEqual({ url: "https://docs.google.com/document/d/new-1/edit" });
+  expect(uploads.map(({ method, url, headers }) => [method, new URL(url).pathname, headers.get("Authorization")]))
+    .toEqual([["POST", "/upload/drive/v3/files", "Bearer access-token"], ["PUT", "/upload/drive/v3/files", null]]);
+
+  let without = await storedAccount([GOOGLE_DOC_RESOURCE.urlPattern]);
+  await expect(without.user.saveFile(GOOGLE_DOC_RESOURCE.id!, folder, "Plan", DOCX, file()))
+    .rejects.toThrow(/hasn't let this app save files to its Drive/);
+  expect(uploads).toHaveLength(2);
+});
 
 describe("the Office import grant on a stored account", () => {
   it("is kept by the account, so asking for it again needs no consent, but is never described", async () => {

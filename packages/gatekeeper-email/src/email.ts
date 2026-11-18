@@ -19,6 +19,7 @@ import {
   stripTrailingSlashes,
   workerVersionTag,
   type ConnectHandoff,
+  resourceTypeUrlPattern,
 } from '@gadgets/workshop-shared/gatekeeper';
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { ActionJournal, type BoundActionSet, type TaggedAction } from "@gadgets/gatekeeper-kit/actions";
@@ -98,6 +99,7 @@ function getBasePath(env: Env) {
 
 function getEmailMailboxResource(env: Env): SupportedResource {
   return {
+    id: "mailbox",
     urlPattern: `${getBaseUrl(env)}/mailbox/:user`,
     title: "Email Mailbox",
     description: "Send and receive emails.",
@@ -391,6 +393,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    resourceUrlPattern = resourceTypeUrlPattern(await this.getSupportedResources(), resourceUrlPattern);
     let resource = getEmailMailboxResource(this.env);
     if (resourceUrlPattern !== resource.urlPattern) {
       throw new Error(`Unsupported resource configurator type: ${resourceUrlPattern}`);
