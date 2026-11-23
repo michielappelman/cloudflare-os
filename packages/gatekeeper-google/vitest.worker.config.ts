@@ -54,6 +54,7 @@ export default defineConfig({
   test: {
     testTimeout: 15_000,
     include: [
+      "__tests__/workerd/account-credentials.test.ts",
       "__tests__/workerd/bigquery-observers.test.ts",
       "__tests__/workerd/calendar-observers.test.ts",
       "__tests__/workerd/chat-actions.test.ts",
@@ -62,6 +63,7 @@ export default defineConfig({
       "__tests__/workerd/configurators.test.ts",
       "__tests__/workerd/drive-pdf.test.ts",
       "__tests__/workerd/gmail-actions.test.ts",
+      "__tests__/workerd/gmail-group.test.ts",
       "__tests__/workerd/gmail-hooks.test.ts",
       "__tests__/workerd/gmail-observers.test.ts",
       "__tests__/workerd/gmail-pdf.test.ts",

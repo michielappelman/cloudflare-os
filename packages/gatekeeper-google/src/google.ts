@@ -12,7 +12,7 @@ import {
   type PreviewOAuthState,
 } from "@gadgets/gatekeeper-kit/preview-oauth";
 import { formatSubresourceId, parseSubresourceId } from "@gadgets/gatekeeper-kit/subresource-ids";
-import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleAccountProfile, getGoogleVerifiedEmail, GoogleAccessToken, revokeGoogleToken } from "./google-api";
+import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleAccountProfile, getGoogleVerifiedEmail, GoogleAccessToken, GoogleUserInfoError, RefreshFailure, revokeGoogleToken } from "./google-api";
 import type { GoogleDocEditSession, GoogleDocReadSession } from "./docs-types";
 import { GoogleDocsApi } from "./docs-api";
 import { GoogleSheetsApi } from "./sheets-api";
@@ -99,6 +99,7 @@ import type {
 } from "./drive-types";
 import { ChatApi, ChatApiError } from "./chat-api";
 import { verifyGoogleSubresourceAccess, type GoogleVerifierApi } from "./google-verifier-types";
+import { CloudIdentityApi, CloudIdentityApiError } from "./cloud-identity-api";
 import { BigQueryApi, BigQueryApiError, DEFAULT_MAX_BYTES_BILLED } from "./bigquery-api";
 import {
   BigQueryDataset, BigQueryDryRunResult, BigQueryField, BigQueryProject,
@@ -132,6 +133,7 @@ import {
   ChatSpaceConfiguratorUI,
   ChatThreadConfiguratorUI,
   GmailConfiguratorUI,
+  GoogleGroupConfiguratorUI,
   DriveConfiguratorUI,
   CreationLocationConfiguratorUI,
 } from "./google-configurators";
@@ -141,11 +143,12 @@ import CHAT_ACCOUNT_CONFIGURATOR_HTML from "./generated/chat-account-configurato
 import CHAT_SPACE_CONFIGURATOR_HTML from "./generated/chat-space-configurator-ui.txt";
 import CHAT_THREAD_CONFIGURATOR_HTML from "./generated/chat-thread-configurator-ui.txt";
 import GMAIL_CONFIGURATOR_HTML from "./generated/gmail-configurator-ui.txt";
+import GOOGLE_GROUP_CONFIGURATOR_HTML from "./generated/google-group-configurator-ui.txt";
 import DRIVE_CONFIGURATOR_HTML from "./generated/drive-configurator-ui.txt";
 import CREATION_LOCATION_CONFIGURATOR_HTML from "./generated/creation-location-configurator-ui.txt";
 import GOOGLE_LOGO_SVG from "./google-logo.svg";
 import { obsContext } from "./observability.js";
-import { AccessTokenCache, AccessTokenRequest, ACCESS_TOKEN_EXPIRY_SAFETY_MS } from "./auth-retry";
+import { AccessTokenCache, AccessTokenRequest, ACCESS_TOKEN_EXPIRY_SAFETY_MS, type AccessTokenProvider } from "./auth-retry";
 import { Mutex } from "./mutex";
 import { PendingActionStore } from "./pending-actions";
 import {
@@ -157,7 +160,7 @@ import { saveFile } from "./save-file";
 import {
   BIGQUERY_HOST, BIGQUERY_QUERY_PROJECT_PARAM, BIGQUERY_RESOURCE, GMAIL_RESOURCE, GOOGLE_CALENDAR_RESOURCE,
   GOOGLE_CHAT_RESOURCE, GOOGLE_CHAT_SPACE_RESOURCE, GOOGLE_CHAT_THREAD_RESOURCE,
-  GOOGLE_DRIVE_RESOURCE,
+  GOOGLE_DRIVE_RESOURCE, GOOGLE_GROUP_RESOURCE,
   RESOURCE_BY_KIND,
   SUPPORTED_RESOURCES, creatableKind, nativeFileUrl,
   DRIVE_WRITES_GRANT, grantedResourceUrlPatterns, hasDriveResourceGrant, isPrivateGrant,
@@ -219,7 +222,7 @@ function getGoogleDriveTypesCode(write: boolean): string {
 }
 
 import {
-  GMAIL_SUBRESOURCE_NAMESPACE, parseGmailUserSubresource, type GmailGatekeeperImplProps,
+  GMAIL_SUBRESOURCE_NAMESPACE, parseGmailSubresource, type GmailGatekeeperImplProps, type GmailSubresource,
 } from "./gmail";
 import {
   CHAT_SUBRESOURCE_NAMESPACE, parseChatSubresource, type ChatSubresource, type GoogleChatGatekeeperImplProps,
@@ -458,7 +461,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "Connect your Google account to give Cloudflare OS access to Gmail, Google Docs, Google " +
           "Sheets, Google Slides, Google Drive, Google Calendar, Google Chat, and BigQuery. Build " +
           "agents that triage email, draft and edit documents, spreadsheets and presentations, " +
-          "search Drive and read native Docs and Sheets, find focus time, " +
+          "search Drive and read its Docs, Sheets, Slides, PDFs and other files, find focus time, " +
           "schedule meetings, follow and post to Chat conversations, or run analytics queries on " +
           "your data.",
       providesAuth: true,
@@ -550,13 +553,14 @@ const SUBRESOURCE_ACCESS_DENIED_TTL_MS = 15_000;
 type AccountSubresource =
   | { kind: "calendar" | "freeBusy"; calendarId: string }
   | { kind: "bigQueryDataset"; dataset: BigQueryDatasetRef }
-  | { kind: "gmailUser"; subject: string }
+  | GmailSubresource
   | ChatSubresource
   | FileSubresource;
 
 /**
  * What a subresource a Google gatekeeper asks an account about names: a calendar or its free/busy
- * (see parseCalendarSubresource), a BigQuery dataset, a Gmail mailbox's owner, a Google Chat
+ * (see parseCalendarSubresource), a BigQuery dataset, a Gmail mailbox's owner or a Google Group
+ * whose mail a Gmail binding shares (see parseGmailSubresource), a Google Chat
  * conversation, its member list or account (see parseChatSubresource), or a Drive file, its content
  * or a folder, or a native Docs, Sheets or Slides file (see parseFileSubresource). Throws for any
  * other ID.
@@ -568,7 +572,7 @@ function parseAccountSubresource(subresource: string): AccountSubresource {
     case BIGQUERY_SUBRESOURCE_NAMESPACE:
       return { kind: "bigQueryDataset", dataset: parseBigQueryDatasetSubresource(subresource) };
     case GMAIL_SUBRESOURCE_NAMESPACE:
-      return { kind: "gmailUser", subject: parseGmailUserSubresource(subresource) };
+      return parseGmailSubresource(subresource);
     case CHAT_SUBRESOURCE_NAMESPACE:
       return parseChatSubresource(subresource);
     case DRIVE_SUBRESOURCE_NAMESPACE:
@@ -579,6 +583,22 @@ function parseAccountSubresource(subresource: string): AccountSubresource {
     default:
       throw new Error("Not a Google subresource.");
   }
+}
+
+/** What a caller is told when Google permanently refuses to refresh the account's access token. */
+function refreshFailureMessage(failure: RefreshFailure): string {
+  if (failure.reason === "policyBlocked") {
+    return "A Google Workspace admin has restricted access this connection needs " +
+        `(${failure.detail}). Ask your administrator to allow it — re-authenticating will not help.`;
+  }
+  // The account's organization limits how long a sign-in lasts for Google Cloud, which a connection
+  // holding a Cloud scope such as BigQuery's is subject to. Only signing in again renews it. Google
+  // names the condition with either subtype.
+  if (failure.subtype === "invalid_rapt" || failure.subtype === "rapt_required") {
+    return "Google needs this account to sign in again: its organization requires a new sign-in " +
+        "for Google Cloud access (such as BigQuery) every so often. Please re-authenticate.";
+  }
+  return "Google credentials have expired or been revoked. Please re-authenticate.";
 }
 
 export class UserAccount extends DurableObject<Env> {
@@ -783,6 +803,7 @@ export class UserAccount extends DurableObject<Env> {
     let calendars = new Map<string, string>();
     let datasets = new Map<string, BigQueryDatasetRef>();
     let owners = new Map<string, string>();
+    let groups = new Map<string, string>();
     let conversations = new Map<string, { spaceName: string; members: boolean }>();
     let driveUnits = new Map<string, DriveUnit>();
     let nativeFiles = new Map<string, NativeFileSubresource>();
@@ -790,6 +811,8 @@ export class UserAccount extends DurableObject<Env> {
       if (resource.kind === "bigQueryDataset") datasets.set(subresource, resource.dataset);
       else if (resource.kind === "gmailUser" || resource.kind === "chatUser") {
         owners.set(subresource, resource.subject);
+      } else if (resource.kind === "gmailGroup") {
+        groups.set(subresource, resource.groupName);
       } else if (resource.kind === "chatSpace" || resource.kind === "chatSpaceMembers") {
         conversations.set(subresource,
           { spaceName: resource.spaceName, members: resource.kind === "chatSpaceMembers" });
@@ -854,6 +877,12 @@ export class UserAccount extends DurableObject<Env> {
       let answers = await mapWithConcurrency(entries, DEFAULT_CONCURRENCY, ([subresource, file]) =>
           this.#access.cached(subresource, ttl, () => hasNativeFileAccess(getToken, file)));
       entries.forEach(([subresource], index) => access.set(subresource, answers[index]));
+    }
+    if (groups.size > 0) {
+      for (let [subresource, groupName] of groups) {
+        access.set(subresource, await this.#access.cached(subresource, ttl,
+            () => hasGoogleGroupMembership(getToken, groupName)));
+      }
     }
     if (owners.size > 0) {
       // A mailbox or a Chat account is private to its owner, so only that same Google account can
@@ -942,14 +971,18 @@ export class UserAccount extends DurableObject<Env> {
       let result = await getAccessToken(refreshToken, clientId, clientSecret,
           AbortSignal.timeout(TOKEN_MINT_TIMEOUT_MS));
       if (!result.ok) {
-        // Both are permanent, so both mark the connection dead. They differ in the remedy:
+        // Google's codes only, never its prose: they tell a revoked or expired grant
+        // (`invalid_grant`) from a Google Cloud session that ran out (`invalid_rapt` or
+        // `rapt_required`).
+        logger.warn("Google refused to refresh an access token", {
+          event: "google.token.mint.refused",
+          providerError: result.reason === "policyBlocked" ? "admin_policy_enforced" : "invalid_grant",
+          ...(result.reason === "revoked" && result.subtype !== undefined
+              ? { providerSubtype: result.subtype } : {}),
+        });
+        // All are permanent, so all mark the connection dead. They differ in the remedy:
         // re-authenticating fixes a revoked grant but cannot grant a scope an admin has blocked.
-        let error = new Error(
-            result.reason === "policyBlocked"
-                ? "A Google Workspace admin has restricted access this connection needs " +
-                  `(${result.detail}). Ask your administrator to allow it — re-authenticating ` +
-                  "will not help."
-                : "Google credentials have expired or been revoked. Please re-authenticate.");
+        let error = new Error(refreshFailureMessage(result));
         // Recorded before notifying so only the first caller of a burst does either.
         this.#mintFailure = { error, at: Date.now() };
         this.#notifyCredentialsDead();
@@ -1098,6 +1131,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         };
         return {class: this.ctx.exports.GmailGatekeeperImpl({props}), resource};
       }
+      case "group": {
+        let props: GmailGatekeeperImplProps = {
+          userObjectId, groupAddress: target.groupAddress,
+          ...(target.outsideSenders ? {groupOutsideSenders: true} : {}),
+        };
+        return {class: this.ctx.exports.GmailGatekeeperImpl({props}), resource};
+      }
       case "doc": {
         let props: GoogleDocGatekeeperImplProps = {userObjectId, documentId: target.documentId};
         return {class: this.ctx.exports.GoogleDocGatekeeperImpl({props}), resource};
@@ -1191,6 +1231,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {
         iframeHtml: GMAIL_CONFIGURATOR_HTML,
         ui: new RpcStub(new GmailConfiguratorUI()),
+      };
+    }
+
+    if (resourceUrlPattern === GOOGLE_GROUP_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GOOGLE_GROUP_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GoogleGroupConfiguratorUI(getToken, holds)),
       };
     }
 
@@ -1324,6 +1371,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 //   - Gmail Mailbox — strategy A (private-only), kernel-checked: every read reports its owner's
 //     account as a `gmail/user/<sub>` subresource, which checkSubresourceAccess grants only to that
 //     same Google account. addObserver still always throws, for reads made before they reported it.
+//   - Google Group — strategy B (ACL check, single unit), kernel-checked: every read reports the
+//     group as `gmail/group/<groupId>`, which checkSubresourceAccess grants only to an account that
+//     is a direct member of it, as Cloud Identity answers that account's own token (see
+//     hasGoogleGroupMembership).
 //   - Google Doc, Sheets and Slides — strategy B (ACL check, single unit), kernel-checked: every
 //     read reports the bound file as `docs/document/<documentId>`,
 //     `sheets/spreadsheet/<spreadsheetId>` or `slides/presentation/<presentationId>`, which
@@ -1425,11 +1476,51 @@ async function hasChatAccess(api: ChatApi, spaceName: string, members: boolean):
 }
 
 /**
+ * Whether the account behind `getToken` is a direct member of the Google Group named `groupName`,
+ * asked of Cloud Identity with that account's own token, about the address Google's userinfo
+ * verified for the same token: false when it isn't one (404) or the group doesn't let it see its
+ * members (403), which is all a group that shows its members only to them tells anyone else, and a
+ * throw for any other failure. Two 403s say nothing about membership, and throw: the account never
+ * let this app see its groups, or the deployment's project lacks the API.
+ */
+async function hasGoogleGroupMembership(getToken: AccessTokenProvider, groupName: string): Promise<boolean> {
+  // The address and the membership are asked with one token, so both are one account's: a
+  // reconnect between two tokens would have one account answer for another's address. A token
+  // Google refuses (401) is replaced once, and both are asked again with the new one.
+  let token = await getToken();
+  let ask = async () => {
+    let email = await getGoogleVerifiedEmail(token);
+    if (!email) throw new Error("This Google account has no verified email address.");
+    return await new CloudIdentityApi(async () => token).isDirectMember(groupName, email.toLowerCase());
+  };
+  let refused = (error: unknown) =>
+    (error instanceof CloudIdentityApiError || error instanceof GoogleUserInfoError) && error.status === 401;
+  try {
+    try {
+      return await ask();
+    } catch (error) {
+      if (!refused(error)) throw error;
+      token = await getToken({forceRefresh: true, staleToken: token});
+      return await ask();
+    }
+  } catch (error) {
+    if (!(error instanceof CloudIdentityApiError) || error.status !== 403) throw error;
+    if (error.reason === "ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+      throw new Error("A collaborator's Google account hasn't let this app see its groups. They " +
+          "need to grant it access to Google Groups.", {cause: error});
+    }
+    if (error.reason === "SERVICE_DISABLED") throw error;
+    return false;
+  }
+}
+
+/**
  * Whether the account behind `getToken` can open a native file in the API that reads it (Docs,
  * Sheets or Slides): false when Google refuses it without giving a reason (403) or doesn't hold it
  * for the account (404), and a throw for any other failure. Google gives a reason for the refusals
- * that say nothing about the account's access, such as a missing scope or a disabled API, and a
- * 401 that survives a fresh token means the credentials, not the file.
+ * that say nothing about the account's access, such as a missing scope or a disabled API, so a
+ * refusal whose reasons couldn't be read throws; a 401 that survives a fresh token means the
+ * credentials, not the file.
  */
 async function hasNativeFileAccess(
     getToken: (opts?: AccessTokenRequest) => Promise<string>,
@@ -1444,7 +1535,8 @@ async function hasNativeFileAccess(
   } catch (error) {
     let status = httpStatusFromError(error);
     if (error instanceof GoogleApiError &&
-        (status === 404 || (status === 403 && error.providerReasons.length === 0))) {
+        (status === 404 ||
+          (status === 403 && error.providerErrorRead && error.providerReasons.length === 0))) {
       return false;
     }
     throw error;
@@ -2391,7 +2483,7 @@ export class GoogleDriveGatekeeperImpl
       // Validated here too, so a hand-built resource URL fails at connect rather than minting a
       // presentable binding whose every call then refuses.
       let folder = await readFolderRoot(scope.folderId, id => api.getFile(id));
-      let reads = "list and search direct children, navigate child folders, read native Google Docs, Sheets and Slides, read PDFs' text with readPdf() and any other file's bytes with readFile()";
+      let reads = "list and search direct children, navigate child folders, follow shortcuts among them to files and folders elsewhere in Drive for reading, read native Google Docs, Sheets and Slides, read PDFs' text with readPdf() and any other file's bytes with readFile()";
       return {
         // The natural browser URL, not the internal `_resource` selector the grant is keyed on.
         url: `https://drive.google.com/drive/folders/${encodeURIComponent(scope.folderId)}`,
@@ -2643,6 +2735,14 @@ const LISTING_TAKES_WRITES = "Seeing who a file is shared with takes what changi
 const MOVE_NEEDS_A_FOLDER =
   "Moving takes a folder or all-of-Drive connection: the single-file connection named below " +
   "cannot move a file.";
+
+/**
+ * Said of a write in a folder opened through a shortcut, which reads follow and writes do not: the
+ * folder is not in the connected one.
+ */
+const THROUGH_SHORTCUT =
+  "This folder was opened through a shortcut, so its files can be read here but not changed, " +
+  "commented on, shared, listed for who they are shared with, or moved.";
 
 /** The Drive session methods that open a native file. */
 type NativeOpener = "openGoogleDoc" | "openGoogleSheet" | "openGoogleSlides";
@@ -2992,6 +3092,7 @@ export class GoogleDriveSessionImpl extends RpcTarget
   }
 
   async listAccess(fileId: string): Promise<DriveAccess[]> {
+    this.#refuseThroughShortcut();
     // A listing is a read, and each refusal speaks of changes, so it is said what the two share.
     let refused = await this.#writes.writeRefusal();
     if (refused !== undefined) throw new Error(`${LISTING_TAKES_WRITES} ${refused}`);
@@ -3048,6 +3149,7 @@ export class GoogleDriveSessionImpl extends RpcTarget
   async move(fileId: string, folderId: string): Promise<void> {
     // Said before the write refusal, whose URL on a read-only file binding could not move either.
     if (this.#scope.kind === "file") throw new Error(MOVE_SINGLE_FILE);
+    this.#refuseThroughShortcut();
     let refused = await this.#writes.writeRefusal();
     if (refused !== undefined) {
       // Only an all-of-Drive binding's read-only refusal names a connection that cannot move.
@@ -3080,13 +3182,24 @@ export class GoogleDriveSessionImpl extends RpcTarget
   }
 
   /**
-   * Refuses a write this binding may not make, with the reason `writeRefusal()` gives: the
-   * deployment keeps Google Drive read-only, the binding is read-only, or its account does not
-   * allow changes.
+   * Refuses a write this binding may not make: one in a folder opened through a shortcut, or one
+   * `writeRefusal()` refuses because the deployment keeps Google Drive read-only, the binding is
+   * read-only, or its account does not allow changes.
    */
   async #requireWritable(): Promise<void> {
+    this.#refuseThroughShortcut();
     let refused = await this.#writes.writeRefusal();
     if (refused !== undefined) throw new Error(refused);
+  }
+
+  /**
+   * Refuses a write, or a listing of who has access, in a folder opened through a shortcut, before
+   * any refusal that asks for more access, which could not make it writable. A
+   * write's proof at approval, along the saved path alone, would refuse it anyway; a listing
+   * proves the positioned folder as a sharing target and would not.
+   */
+  #refuseThroughShortcut(): void {
+    if (this.#location?.shortcuts) throw new Error(THROUGH_SHORTCUT);
   }
 
   /**

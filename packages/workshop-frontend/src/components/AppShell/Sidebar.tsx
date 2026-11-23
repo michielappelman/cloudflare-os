@@ -154,8 +154,9 @@ export default function Sidebar({
               return (
               <SidebarItem
                 key={app.id}
-                to="/gatekeepers/$appId"
-                params={{ appId: app.id }}
+                to="/gatekeepers/$appId/$"
+                params={{ appId: app.id, _splat: '' }}
+                matchPrefix
                 label={app.title}
                 icon={
                   maskUrl ? (
